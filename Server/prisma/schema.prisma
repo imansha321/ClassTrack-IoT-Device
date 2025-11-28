@@ -1,0 +1,145 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  fullName  String
+  schoolName String
+  role      Role     @default(ADMIN)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+enum Role {
+  ADMIN
+  TEACHER
+  STAFF
+}
+
+model Student {
+  id              String   @id @default(uuid())
+  studentId       String   @unique
+  name            String
+  class           String
+  fingerprintData String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  attendances     Attendance[]
+
+  @@map("students")
+}
+
+model Attendance {
+  id                String   @id @default(uuid())
+  studentId         String
+  student           Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  checkInTime       DateTime
+  status            AttendanceStatus
+  fingerprintMatch  Boolean  @default(true)
+  reliability       Int      @default(98)
+  deviceId          String?
+  device            Device?  @relation(fields: [deviceId], references: [id])
+  createdAt         DateTime @default(now())
+
+  @@index([studentId])
+  @@index([checkInTime])
+  @@map("attendances")
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+}
+
+model Device {
+  id              String   @id @default(uuid())
+  deviceId        String   @unique
+  name            String
+  type            DeviceType
+  location        String
+  status          DeviceStatus @default(ONLINE)
+  battery         Int      @default(100)
+  signal          Int      @default(100)
+  lastSeen        DateTime @default(now())
+  uptime          String?
+  firmwareVersion String   @default("v2.1.3")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  attendances     Attendance[]
+  airQualityReadings AirQuality[]
+
+  @@map("devices")
+}
+
+enum DeviceType {
+  FINGERPRINT_SCANNER
+  MULTI_SENSOR
+  AIR_QUALITY_SENSOR
+}
+
+enum DeviceStatus {
+  ONLINE
+  OFFLINE
+  MAINTENANCE
+}
+
+model AirQuality {
+  id          String   @id @default(uuid())
+  deviceId    String
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  room        String
+  pm25        Float
+  co2         Int
+  temperature Float
+  humidity    Float
+  timestamp   DateTime @default(now())
+
+  @@index([deviceId])
+  @@index([timestamp])
+  @@map("air_quality")
+}
+
+model Alert {
+  id        String      @id @default(uuid())
+  type      AlertType
+  severity  AlertSeverity
+  message   String
+  room      String?
+  metric    String?
+  value     String?
+  threshold String?
+  resolved  Boolean   @default(false)
+  createdAt DateTime  @default(now())
+
+  @@index([createdAt])
+  @@map("alerts")
+}
+
+enum AlertType {
+  AIR_QUALITY
+  DEVICE
+  ATTENDANCE
+  SYSTEM
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}

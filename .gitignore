@@ -1,0 +1,59 @@
+# Node modules
+node_modules/
+
+# Client and Server node_modules (monorepo)
+Client/node_modules/
+Server/node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Production
+build/
+dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Runtime data
+*.pid
+*.seed
+
+# Local env files
+.env
+.env.*
+
+# Lockfiles (optional to ignore if using yarn/pnpm across workspaces)
+# Uncomment if you want to ignore lockfiles managed outside git
+# package-lock.json
+pnpm-lock.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+.vscode/
+.idea/
+*.iml
+
+# Coverage and test output
+coverage/
+.nyc_output/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Temporary files
+tmp/
+temp/
+__pycache__/
+
+# Tailwind / PostCSS cache
+.cache/
