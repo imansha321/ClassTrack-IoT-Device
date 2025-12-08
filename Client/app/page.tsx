@@ -7,17 +7,20 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 
 export default function Home() {
-  const { isAuthenticated, isLoading } = useAuth()
+  const { isAuthenticated, isLoading, hasHydrated } = useAuth()
   const router = useRouter()
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
+    if (!hasHydrated || isLoading) {
+      return
+    }
+    if (!isAuthenticated) {
       router.push("/login")
     }
-  }, [isAuthenticated, isLoading, router])
+  }, [hasHydrated, isAuthenticated, isLoading, router])
 
-  if (isLoading) {
+  if (!hasHydrated || isLoading) {
     return (
       <div className="flex items-center justify-center h-screen bg-background">
         <div className="text-center">

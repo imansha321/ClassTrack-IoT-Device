@@ -1,25 +1,84 @@
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
+const SCHOOL_CONTEXT_KEY = "classtrack:schoolId";
+
 function getAuthToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("classtrack:token");
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+function getStoredSchoolId(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(SCHOOL_CONTEXT_KEY);
+}
+
+type ApiOptions = RequestInit & { skipSchoolContext?: boolean };
+
+export type SignupPayload = {
+  fullName: string
+  email: string
+  password: string
+  schoolName?: string
+  schoolId?: string
+  role?: "PLATFORM_ADMIN" | "SCHOOL_ADMIN" | "TEACHER" | "STAFF"
+}
+
+export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const url = path.startsWith("http") ? path : `${API_BASE_URL}${path}`;
   const token = getAuthToken();
+  const { skipSchoolContext, ...requestInit } = options;
 
-  const headers = new Headers(options.headers || {});
+  const headers = new Headers(requestInit.headers || {});
   headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const res = await fetch(url, {
-    ...options,
+  const method = (requestInit.method || "GET").toUpperCase();
+  const attachSchool = !skipSchoolContext;
+  let requestUrl = url;
+
+  if (attachSchool && method === "GET") {
+    const schoolId = getStoredSchoolId();
+    if (schoolId) {
+      try {
+        const parsed = new URL(url);
+        if (!parsed.searchParams.has("schoolId")) {
+          parsed.searchParams.set("schoolId", schoolId);
+        }
+        requestUrl = parsed.toString();
+      } catch {
+        requestUrl = url;
+      }
+    }
+  }
+
+  let body = requestInit.body;
+  if (
+    attachSchool &&
+    body &&
+    typeof body === "string" &&
+    headers.get("Content-Type")?.includes("application/json")
+  ) {
+    try {
+      const parsedBody = JSON.parse(body);
+      if (parsedBody && parsedBody.schoolId === undefined) {
+        const schoolId = getStoredSchoolId();
+        if (schoolId) {
+          parsedBody.schoolId = schoolId;
+          body = JSON.stringify(parsedBody);
+        }
+      }
+    } catch {
+      // ignore malformed JSON bodies
+    }
+  }
+
+  const res = await fetch(requestUrl, {
+    ...requestInit,
     headers,
+    body,
   });
 
   if (res.status === 401) {
-    // Unauthorized: clear token
     if (typeof window !== "undefined") {
       localStorage.removeItem("classtrack:token");
       localStorage.removeItem("classtrack:user");
@@ -45,11 +104,15 @@ export const AuthAPI = {
       body: JSON.stringify({ email, password }),
     });
   },
-  async signup(fullName: string, email: string, schoolName: string, password: string) {
+  async signup(payload: SignupPayload) {
     return apiFetch<{ user: any; token: string }>(`/api/auth/signup`, {
       method: "POST",
-      body: JSON.stringify({ fullName, email, schoolName, password }),
+      body: JSON.stringify(payload),
+      skipSchoolContext: true,
     });
+  },
+  async schools() {
+    return apiFetch<Array<{ id: string; name: string }>>(`/api/auth/schools`, { skipSchoolContext: true });
   },
 };
 
@@ -77,13 +140,14 @@ export const AlertsAPI = {
 };
 
 export const DevicesAPI = {
-  list(params?: { status?: string }) {
+  list(params?: { status?: string; classroomId?: string }) {
     const qs = new URLSearchParams();
-    if (params?.status) qs.set("status", params.status);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.classroomId) qs.set('classroomId', params.classroomId);
     const query = qs.toString();
-    return apiFetch(`/api/devices${query ? `?${query}` : ""}`);
+    return apiFetch(`/api/devices${query ? `?${query}` : ''}`);
   },
-  create(data: { deviceId: string; name: string; type: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; location: string; firmwareVersion?: string }) {
+  create(data: { deviceId: string; name: string; type: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; location: string; firmwareVersion?: string; classroomId?: string | null }) {
     return apiFetch(`/api/devices`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -92,7 +156,7 @@ export const DevicesAPI = {
   get(id: string) {
     return apiFetch(`/api/devices/${encodeURIComponent(id)}`);
   },
-  update(id: string, data: { name?: string; location?: string; status?: string; battery?: number; signal?: number; firmwareVersion?: string }) {
+  update(id: string, data: { name?: string; location?: string; status?: string; battery?: number; signal?: number; firmwareVersion?: string; classroomId?: string | null }) {
     return apiFetch(`/api/devices/${encodeURIComponent(id)}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -101,7 +165,13 @@ export const DevicesAPI = {
   delete(id: string) {
     return apiFetch(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
-  provision(data: { deviceId: string }) {
+  register(data: { deviceId: string; name: string; type: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; location: string; firmwareVersion?: string; classroomId?: string | null }) {
+    return apiFetch<{ device: any; deviceToken: string }>(`/api/devices/register`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+  provision(data: { deviceId: string; name?: string; type?: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; classroomId?: string | null }) {
     return apiFetch<{ deviceToken: string }>(`/api/devices/provision`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -113,26 +183,30 @@ export const AdminAPI = {
   listUsers() {
     return apiFetch(`/api/admin/users`);
   },
-  updateUserRole(id: string, role: 'ADMIN' | 'TEACHER' | 'STAFF') {
+  updateUserRole(id: string, data: { role: 'PLATFORM_ADMIN' | 'SCHOOL_ADMIN' | 'TEACHER' | 'STAFF'; schoolId?: string | null }) {
     return apiFetch(`/api/admin/users/${id}/role`, {
       method: 'PATCH',
-      body: JSON.stringify({ role }),
+      body: JSON.stringify(data),
     });
   },
   deleteUser(id: string) {
     return apiFetch(`/api/admin/users/${id}`, { method: 'DELETE' });
   },
+  listSchools() {
+    return apiFetch(`/api/admin/schools`);
+  },
 };
 
 export const StudentsAPI = {
-  list(params?: { class?: string; search?: string }) {
+  list(params?: { class?: string; search?: string; classroomId?: string }) {
     const qs = new URLSearchParams();
     if (params?.class) qs.set('class', params.class);
     if (params?.search) qs.set('search', params.search);
+    if (params?.classroomId) qs.set('classroomId', params.classroomId);
     const query = qs.toString();
     return apiFetch(`/api/students${query ? `?${query}` : ''}`);
   },
-  create(data: { studentId: string; name: string; class: string; fingerprintData?: string }) {
+  create(data: { studentId: string; name: string; class: string; fingerprintData?: string; classroomId?: string | null }) {
     return apiFetch(`/api/students`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -141,7 +215,7 @@ export const StudentsAPI = {
   get(id: string) {
     return apiFetch(`/api/students/${encodeURIComponent(id)}`);
   },
-  update(id: string, data: { name?: string; class?: string; fingerprintData?: string }) {
+  update(id: string, data: { name?: string; class?: string; fingerprintData?: string; classroomId?: string | null }) {
     return apiFetch(`/api/students/${encodeURIComponent(id)}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -153,10 +227,11 @@ export const StudentsAPI = {
 };
 
 export const AttendanceAPI = {
-  list(params?: { date?: string; class?: string }) {
+  list(params?: { date?: string; class?: string; classroomId?: string }) {
     const qs = new URLSearchParams();
     if (params?.date) qs.set('date', params.date);
     if (params?.class) qs.set('class', params.class);
+    if (params?.classroomId) qs.set('classroomId', params.classroomId);
     const query = qs.toString();
     return apiFetch(`/api/attendance${query ? `?${query}` : ''}`);
   },
@@ -172,6 +247,35 @@ export const AttendanceAPI = {
     if (limit) qs.set('limit', String(limit));
     return apiFetch(`/api/attendance/student/${encodeURIComponent(studentId)}${qs.toString() ? `?${qs.toString()}` : ''}`);
   }
+};
+
+export const ClassroomsAPI = {
+  list() {
+    return apiFetch(`/api/classrooms`);
+  },
+  create(data: { name: string; grade?: string; section?: string; capacity?: number }) {
+    return apiFetch(`/api/classrooms`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+  teachers() {
+    return apiFetch<Array<{ id: string; fullName: string | null; email: string | null }>>(`/api/classrooms/teachers`);
+  },
+  assignTeacher(id: string, teacherId: string) {
+    return apiFetch(`/api/classrooms/${encodeURIComponent(id)}/teachers`, {
+      method: 'POST',
+      body: JSON.stringify({ teacherId }),
+    });
+  },
+  removeTeacher(id: string, teacherId: string) {
+    return apiFetch(`/api/classrooms/${encodeURIComponent(id)}/teachers/${encodeURIComponent(teacherId)}`, {
+      method: 'DELETE',
+    });
+  },
+  delete(id: string) {
+    return apiFetch(`/api/classrooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
 };
 
 export const AirQualityAPI = {
@@ -216,4 +320,25 @@ export const ReportsAPI = {
   devices() {
     return apiFetch(`/api/reports/devices`);
   }
+};
+
+export const FingerprintAPI = {
+  requestEnrollment(data: { studentId: string; classroomId?: string; deviceId?: string }) {
+    return apiFetch(`/api/fingerprint/enrollments`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+  getEnrollment(id: string) {
+    return apiFetch(`/api/fingerprint/enrollments/${encodeURIComponent(id)}`);
+  },
+  listEnrollments(params?: { status?: string; classroomId?: string; studentId?: string; limit?: number }) {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.classroomId) qs.set('classroomId', params.classroomId);
+    if (params?.studentId) qs.set('studentId', params.studentId);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString();
+    return apiFetch(`/api/fingerprint/enrollments${query ? `?${query}` : ''}`);
+  },
 };

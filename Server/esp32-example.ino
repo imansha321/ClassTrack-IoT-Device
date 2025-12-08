@@ -40,6 +40,7 @@ String jwtToken = "";
 String deviceToken = "";
 String deviceId = "DEVICE-001";
 String roomName = "Room-1";
+
 // Avoid trailing slash to prevent double slashes when building URLs
 const char *serverBase = "https://4e131f99b938.ngrok-free.app";
 
@@ -62,17 +63,31 @@ UiScreen currentScreen = UI_HOME;
 unsigned long lastUiRotateMs = 0;
 const unsigned long UI_ROTATE_MS = 4000;
 
+struct EnrollmentJob
+{
+    bool active;
+    String id;
+    String studentName;
+    String studentCode;
+    String classLabel;
+};
+
+EnrollmentJob currentEnrollment{false, "", "", "", ""};
+unsigned long lastEnrollmentPollMs = 0;
+const unsigned long ENROLLMENT_POLL_MS = 6000;
+String lastEnrollError = "";
+
 // -------------------- Function Prototypes --------------------
 bool btnPressed(int pin);
 void oledHeader(const char *title);
 void oledFooter(const char *msg);
-void showFingerprintStatus(const char *status, int id = -1, int confidence = -1);
+void showFingerprintStatus(const char *status, int id = -1, int confidence = -1, const char *title = "Fingerprint");
 void showAirQuality(int raw);
 int readMQ135Raw();
 float mq135Percent(int raw);
 float mq135PseudoPPM(int raw);
 int getFingerprintID();
-bool enrollFingerprint(uint16_t id);
+bool enrollFingerprint(uint16_t id, const char *titleOverride = nullptr);
 void IRAM_ATTR isrEnroll();
 void IRAM_ATTR isrNext();
 void IRAM_ATTR isrPrev();
@@ -82,6 +97,16 @@ bool fetchToken(const String &email, const String &password);
 void postAttendance(uint16_t fingerprintId, int confidence);
 void postAirQuality(int raw);
 void postDeviceStatus();
+void attachAuthHeaders(HTTPClient &http);
+void pollEnrollmentQueue();
+bool fetchNextEnrollmentJob(EnrollmentJob &job);
+void showEnrollmentPrompt(const EnrollmentJob &job);
+bool sendEnrollmentComplete(const EnrollmentJob &job, uint16_t slotId);
+void reportEnrollmentFailure(const EnrollmentJob &job, const String &reason);
+void clearEnrollmentJob();
+String extractJsonValue(const String &json, const String &key);
+String extractNestedJsonValue(const String &json, const String &sectionKey, const String &fieldKey);
+String formatClassLabel(const String &room, const String &grade, const String &section);
 void drawHomeScreen();
 void drawWifiScreen();
 void drawDeviceScreen();
@@ -124,9 +149,9 @@ void oledFooter(const char *msg)
     display.println(msg);
 }
 
-void showFingerprintStatus(const char *status, int id, int confidence)
+void showFingerprintStatus(const char *status, int id, int confidence, const char *title)
 {
-    oledHeader("Fingerprint");
+    oledHeader(title);
     display.setCursor(0, 16);
     display.print("Status: ");
     display.println(status);
@@ -197,10 +222,12 @@ int getFingerprintID()
     return fingerID;
 }
 
-bool enrollFingerprint(uint16_t id)
+bool enrollFingerprint(uint16_t id, const char *titleOverride)
 {
+    lastEnrollError = "";
     enrollInProgress = true;
-    showFingerprintStatus("ENROLL", id, -1);
+    const char *uiTitle = (titleOverride && strlen(titleOverride) > 0) ? titleOverride : "Fingerprint";
+    showFingerprintStatus("ENROLL", id, -1, uiTitle);
     Serial.printf("Starting enrollment for ID %u\n", id);
     while (finger.getImage() != FINGERPRINT_OK)
         delay(50);
@@ -209,7 +236,8 @@ bool enrollFingerprint(uint16_t id)
         cancelEnrollIRQ = false;
         enrollInProgress = false;
         Serial.println("Enroll canceled (stage 1)");
-        showFingerprintStatus("CANCELLED", -1, -1);
+        lastEnrollError = "Cancelled";
+        showFingerprintStatus("CANCELLED", -1, -1, uiTitle);
         delay(800);
         return false;
     }
@@ -217,6 +245,7 @@ bool enrollFingerprint(uint16_t id)
     {
         Serial.println("image2Tz(1) failed");
         enrollInProgress = false;
+        lastEnrollError = "image2Tz(1)";
         return false;
     }
     // Duplicate check: try searching existing templates after first conversion
@@ -224,7 +253,8 @@ bool enrollFingerprint(uint16_t id)
     {
         // Found a match – do NOT enroll again
         Serial.printf("Duplicate fingerprint detected (ID=%d). Aborting enrollment.\n", finger.fingerID);
-        showFingerprintStatus("DUPLICATE", finger.fingerID, finger.confidence);
+        lastEnrollError = "Duplicate";
+        showFingerprintStatus("DUPLICATE", finger.fingerID, finger.confidence, uiTitle);
         delay(1200);
         enrollInProgress = false;
         homeToast = "Already registered";
@@ -248,7 +278,8 @@ bool enrollFingerprint(uint16_t id)
         cancelEnrollIRQ = false;
         enrollInProgress = false;
         Serial.println("Enroll canceled (stage 2)");
-        showFingerprintStatus("CANCELLED", -1, -1);
+        lastEnrollError = "Cancelled";
+        showFingerprintStatus("CANCELLED", -1, -1, uiTitle);
         delay(800);
         return false;
     }
@@ -256,12 +287,14 @@ bool enrollFingerprint(uint16_t id)
     {
         Serial.println("image2Tz(2) failed");
         enrollInProgress = false;
+        lastEnrollError = "image2Tz(2)";
         return false;
     }
     if (finger.createModel() != FINGERPRINT_OK)
     {
         Serial.println("createModel failed");
         enrollInProgress = false;
+        lastEnrollError = "createModel";
         return false;
     }
     // Optional second duplicate check before storing (some sensors support model search)
@@ -270,12 +303,14 @@ bool enrollFingerprint(uint16_t id)
     {
         Serial.println("storeModel failed");
         enrollInProgress = false;
+        lastEnrollError = "storeModel";
         return false;
     }
     Serial.println("Enrollment success!");
-    showFingerprintStatus("ENROLLED", id, -1);
+    showFingerprintStatus("ENROLLED", id, -1, uiTitle);
     delay(1500);
     enrollInProgress = false;
+    lastEnrollError = "";
     return true;
 }
 
@@ -390,11 +425,7 @@ void postAttendance(uint16_t fingerprintId, int confidence)
     HTTPClient http;
     String url = String(serverBase) + "/api/attendance/device";
     http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    if (!deviceToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + deviceToken);
-    else if (!jwtToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + jwtToken);
+    attachAuthHeaders(http);
     // Map fingerprint ID to studentId (string). fingerprintMatch true, reliability from confidence
     String payload = String("{\"studentId\":\"") + fingerprintId + "\",\"fingerprintMatch\":true,\"reliability\":" + confidence + "}";
     int code = http.POST(payload);
@@ -409,11 +440,7 @@ void postAirQuality(int raw)
     HTTPClient http;
     String url = String(serverBase) + "/api/airquality/device";
     http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    if (!deviceToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + deviceToken);
-    else if (!jwtToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + jwtToken);
+    attachAuthHeaders(http);
     float pct = mq135Percent(raw);
     float ppm = mq135PseudoPPM(raw);
     float pm25 = pct * 0.8f;   // rough scaling
@@ -434,17 +461,196 @@ void postDeviceStatus()
     HTTPClient http;
     String url = String(serverBase) + "/api/devices/status";
     http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    if (!deviceToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + deviceToken);
-    else if (!jwtToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + jwtToken);
+    attachAuthHeaders(http);
     int rssi = WiFi.RSSI();
     int battery = 95;
     String payload = String("{\"deviceId\":\"") + deviceId + "\",\"signal\":" + rssi + ",\"battery\":" + battery + ",\"status\":\"online\"}";
     int code = http.POST(payload);
     Serial.printf("Device status POST code=%d\n", code);
     http.end();
+}
+
+void attachAuthHeaders(HTTPClient &http)
+{
+    http.addHeader("Content-Type", "application/json");
+    if (!deviceToken.isEmpty())
+        http.addHeader("Authorization", String("Bearer ") + deviceToken);
+    else if (!jwtToken.isEmpty())
+        http.addHeader("Authorization", String("Bearer ") + jwtToken);
+}
+
+String extractJsonValue(const String &json, const String &key)
+{
+    int idx = json.indexOf(key);
+    if (idx < 0)
+        return "";
+    int start = idx + key.length();
+    int end = json.indexOf('"', start);
+    if (end < 0)
+        return "";
+    return json.substring(start, end);
+}
+
+String extractNestedJsonValue(const String &json, const String &sectionKey, const String &fieldKey)
+{
+    int sectionIdx = json.indexOf(sectionKey);
+    if (sectionIdx < 0)
+        return "";
+    int idx = json.indexOf(fieldKey, sectionIdx);
+    if (idx < 0)
+        return "";
+    int start = idx + fieldKey.length();
+    int end = json.indexOf('"', start);
+    if (end < 0)
+        return "";
+    return json.substring(start, end);
+}
+
+String formatClassLabel(const String &room, const String &grade, const String &section)
+{
+    String label = room;
+    String gradePart = grade;
+    if (section.length())
+    {
+        if (gradePart.length())
+            gradePart += "-";
+        gradePart += section;
+    }
+    if (label.length() && gradePart.length())
+    {
+        label += " - ";
+        label += gradePart;
+    }
+    else if (!label.length())
+    {
+        label = gradePart;
+    }
+    if (!label.length())
+        label = "Unassigned";
+    return label;
+}
+
+bool fetchNextEnrollmentJob(EnrollmentJob &job)
+{
+    if (WiFi.status() != WL_CONNECTED)
+        return false;
+    HTTPClient http;
+    String url = String(serverBase) + "/api/fingerprint/device/next";
+    http.begin(url);
+    attachAuthHeaders(http);
+    int code = http.POST("{}");
+    Serial.printf("Enrollment poll status=%d\n", code);
+    if (code != 200)
+    {
+        http.end();
+        return false;
+    }
+    String body = http.getString();
+    http.end();
+    body.trim();
+    if (body == "null" || body.length() < 5)
+        return false;
+
+    job.id = extractJsonValue(body, "\"id\":\"");
+    job.studentName = extractNestedJsonValue(body, "\"student\":{", "\"name\":\"");
+    if (!job.studentName.length())
+        job.studentName = "Student";
+    job.studentCode = extractNestedJsonValue(body, "\"student\":{", "\"studentId\":\"");
+    String room = extractNestedJsonValue(body, "\"classroom\":{", "\"name\":\"");
+    String grade = extractNestedJsonValue(body, "\"classroom\":{", "\"grade\":\"");
+    String section = extractNestedJsonValue(body, "\"classroom\":{", "\"section\":\"");
+    job.classLabel = formatClassLabel(room, grade, section);
+    job.active = job.id.length() > 0;
+    return job.active;
+}
+
+void showEnrollmentPrompt(const EnrollmentJob &job)
+{
+    oledHeader("Enroll Student");
+    display.setCursor(0, 16);
+    display.print(job.studentName);
+    display.setCursor(0, 28);
+    if (job.studentCode.length())
+    {
+        display.print("ID: ");
+        display.println(job.studentCode);
+    }
+    else
+    {
+        display.println("Ready for capture");
+    }
+    display.setCursor(0, 40);
+    display.println(job.classLabel.length() ? job.classLabel : "Unassigned");
+    oledFooter("Press ENROLL to start");
+    display.display();
+}
+
+bool sendEnrollmentComplete(const EnrollmentJob &job, uint16_t slotId)
+{
+    if (!job.active)
+        return false;
+    HTTPClient http;
+    String url = String(serverBase) + "/api/fingerprint/device/" + job.id + "/complete";
+    http.begin(url);
+    attachAuthHeaders(http);
+    String templatePayload = String("sensor-slot-") + slotId;
+    String payload = String("{\"template\":\"") + templatePayload + "\"}";
+    int code = http.POST(payload);
+    Serial.printf("Enrollment complete code=%d\n", code);
+    http.end();
+    return code >= 200 && code < 300;
+}
+
+void reportEnrollmentFailure(const EnrollmentJob &job, const String &reason)
+{
+    if (!job.active)
+        return;
+    HTTPClient http;
+    String url = String(serverBase) + "/api/fingerprint/device/" + job.id + "/fail";
+    http.begin(url);
+    attachAuthHeaders(http);
+    String safeReason = reason;
+    if (!safeReason.length())
+        safeReason = "Device error";
+    safeReason.replace("\"", "'");
+    String payload = String("{\"reason\":\"") + safeReason + "\"}";
+    int code = http.POST(payload);
+    Serial.printf("Enrollment fail code=%d\n", code);
+    http.end();
+}
+
+void clearEnrollmentJob()
+{
+    currentEnrollment.active = false;
+    currentEnrollment.id = "";
+    currentEnrollment.studentName = "";
+    currentEnrollment.studentCode = "";
+    currentEnrollment.classLabel = "";
+    autoRotateEnabled = true;
+    lastEnrollmentPollMs = 0;
+}
+
+void pollEnrollmentQueue()
+{
+    unsigned long now = millis();
+    if (currentEnrollment.active)
+        return;
+    if (deviceToken.isEmpty() && jwtToken.isEmpty())
+        return;
+    if (now - lastEnrollmentPollMs < ENROLLMENT_POLL_MS)
+        return;
+    lastEnrollmentPollMs = now;
+    EnrollmentJob job{false, "", "", "", ""};
+    if (fetchNextEnrollmentJob(job))
+    {
+        currentEnrollment = job;
+        currentEnrollment.active = true;
+        autoRotateEnabled = false;
+        currentScreen = UI_FINGER;
+        showEnrollmentPrompt(currentEnrollment);
+        homeToast = "Enrollment ready";
+        homeToastMs = millis();
+    }
 }
 
 void drawHomeScreen()
@@ -506,7 +712,10 @@ void drawDeviceScreen()
 
 void drawFingerScreenIdle()
 {
-    showFingerprintStatus("SCAN");
+    if (currentEnrollment.active)
+        showEnrollmentPrompt(currentEnrollment);
+    else
+        showFingerprintStatus("SCAN");
 }
 
 void rotateUiIfNeeded()
@@ -635,6 +844,7 @@ void loop()
 {
     // Handle interrupt-driven buttons with debounce in main loop
     unsigned long now = millis();
+    pollEnrollmentQueue();
 
     // Enrollment button
     if (enrollIRQ && (now - lastBtnMs) > BTN_DEBOUNCE_MS && !enrollRequested)
@@ -643,8 +853,32 @@ void loop()
         enrollIRQ = false;
         enrollRequested = true;
         Serial.println("Enroll button pressed");
-        if (enrollFingerprint(nextEnrollId))
+        bool jobTriggered = currentEnrollment.active;
+        const char *titleOverride = jobTriggered ? currentEnrollment.studentName.c_str() : nullptr;
+        bool success = enrollFingerprint(nextEnrollId, titleOverride);
+        if (success)
+        {
+            if (jobTriggered)
+            {
+                bool synced = sendEnrollmentComplete(currentEnrollment, nextEnrollId);
+                if (!synced)
+                {
+                    reportEnrollmentFailure(currentEnrollment, "Upload failed");
+                }
+                homeToast = synced ? "Enrollment synced" : "Enroll upload failed";
+                homeToastMs = millis();
+                clearEnrollmentJob();
+            }
             nextEnrollId++;
+        }
+        else if (jobTriggered)
+        {
+            String reason = lastEnrollError.length() ? lastEnrollError : "Enrollment failed";
+            reportEnrollmentFailure(currentEnrollment, reason);
+            homeToast = "Enroll failed";
+            homeToastMs = millis();
+            clearEnrollmentJob();
+        }
         enrollRequested = false;
     }
 

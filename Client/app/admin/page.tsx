@@ -19,7 +19,7 @@ interface UserRow {
 }
 
 export default function AdminPage() {
-  const { isAuthenticated, user } = useAuth()
+  const { isAuthenticated, user, hasHydrated } = useAuth()
   const router = useRouter()
   const [loading, setLoading] = useState(true)
   const [users, setUsers] = useState<UserRow[]>([])
@@ -28,11 +28,14 @@ export default function AdminPage() {
   const [tokenByDevice, setTokenByDevice] = useState<Record<string, string>>({})
 
   useEffect(() => {
+    if (!hasHydrated) {
+      return
+    }
     if (!isAuthenticated) {
       router.push("/login")
       return
     }
-    if (user?.role !== "ADMIN") {
+    if (user?.role !== "PLATFORM_ADMIN") {
       router.push("/")
       return
     }
@@ -49,7 +52,18 @@ export default function AdminPage() {
         setLoading(false)
       }
     })()
-  }, [isAuthenticated, user, router])
+  }, [hasHydrated, isAuthenticated, user, router])
+
+  if (!hasHydrated) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-background">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Loading...</p>
+        </div>
+      </div>
+    )
+  }
 
   const onChangeRole = async (id: string, role: UserRow["role"]) => {
     const prev = users

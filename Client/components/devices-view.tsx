@@ -6,11 +6,14 @@ import { DevicesAPI } from "@/lib/api"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Cpu, Signal, Battery, AlertCircle, CheckCircle2, Clock } from "lucide-react"
+import { useAuth } from "@/components/auth-context"
 
 export function DevicesView() {
   const [devices, setDevices] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const { user } = useAuth()
+  const canRegisterDevice = user?.role === "PLATFORM_ADMIN" || user?.role === "SCHOOL_ADMIN"
 
   useEffect(() => {
     let active = true
@@ -44,9 +47,11 @@ export function DevicesView() {
           <h1 className="text-3xl font-bold text-foreground">Device Management</h1>
           <p className="text-muted-foreground mt-2">Monitor all IoT devices and their connectivity</p>
         </div>
-        <Button asChild className="bg-primary text-primary-foreground hover:bg-primary/90">
-          <Link href="/devices/add">+ Add Device</Link>
-        </Button>
+        {canRegisterDevice && (
+          <Button asChild className="bg-primary text-primary-foreground hover:bg-primary/90">
+            <Link href="/devices/add">Register Device</Link>
+          </Button>
+        )}
       </div>
 
       {/* Device Stats */}

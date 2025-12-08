@@ -2,9 +2,10 @@
 
 import type React from "react"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/components/auth-context"
+import { AuthAPI } from "@/lib/api"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -23,8 +24,49 @@ export default function SignupPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState("")
   const [passwordStrength, setPasswordStrength] = useState<"weak" | "medium" | "strong">("weak")
+  const [schoolMode, setSchoolMode] = useState<"existing" | "new">("existing")
+  const [selectedSchoolId, setSelectedSchoolId] = useState("")
+  const [role, setRole] = useState<"TEACHER" | "STAFF">("TEACHER")
+  const [schools, setSchools] = useState<Array<{ id: string; name: string }>>([])
+  const [schoolsLoading, setSchoolsLoading] = useState(true)
+  const [schoolsError, setSchoolsError] = useState("")
   const router = useRouter()
   const { signup } = useAuth()
+
+  useEffect(() => {
+    let active = true
+    setSchoolsLoading(true)
+    setSchoolsError("")
+    ;(async () => {
+      try {
+        const list = await AuthAPI.schools()
+        if (!active) return
+        setSchools(list)
+        if (!list.length) {
+          setSchoolMode("new")
+        }
+      } catch (err: any) {
+        if (!active) return
+        setSchoolsError(err?.message || "Failed to load schools")
+        setSchoolMode("new")
+      } finally {
+        if (active) setSchoolsLoading(false)
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const handleSchoolSelect = (value: string) => {
+    if (value === "__new__") {
+      setSchoolMode("new")
+      setSelectedSchoolId("")
+    } else {
+      setSchoolMode("existing")
+      setSelectedSchoolId(value)
+    }
+  }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target
@@ -57,10 +99,31 @@ export default function SignupPage() {
       return
     }
 
+    if (schoolMode === "existing" && !selectedSchoolId) {
+      setError("Select a school to join or switch to creating a new one")
+      return
+    }
+
+    if (schoolMode === "new" && !formData.schoolName.trim()) {
+      setError("Provide a school name to create a new tenant")
+      return
+    }
+
+    if (schoolMode === "new" && selectedSchoolId) {
+      setSelectedSchoolId("")
+    }
+
     setIsLoading(true)
 
     try {
-      await signup(formData.fullName, formData.email, formData.schoolName, formData.password)
+      await signup({
+        fullName: formData.fullName,
+        email: formData.email,
+        password: formData.password,
+        schoolName: schoolMode === "new" ? formData.schoolName : undefined,
+        schoolId: schoolMode === "existing" ? selectedSchoolId : undefined,
+        role: schoolMode === "existing" ? role : undefined,
+      })
       router.push("/")
     } catch (err: any) {
       setError(err?.message || "Failed to create account")
@@ -133,23 +196,67 @@ export default function SignupPage() {
                 />
               </div>
 
-              {/* School Name */}
+              {/* School Selection */}
               <div className="space-y-2">
-                <Label htmlFor="schoolName" className="flex items-center gap-2">
+                <Label className="flex items-center gap-2">
                   <Building2 className="w-4 h-4" />
-                  School Name
+                  School
                 </Label>
-                <Input
-                  id="schoolName"
-                  name="schoolName"
-                  type="text"
-                  placeholder="Your School Name"
-                  value={formData.schoolName}
-                  onChange={handleChange}
-                  required
-                  disabled={isLoading}
-                  className="bg-background"
-                />
+                <div className="space-y-2">
+                  <div className="flex flex-col gap-2">
+                    {schoolsError ? (
+                      <p className="text-xs text-destructive">{schoolsError}</p>
+                    ) : schoolsLoading ? (
+                      <p className="text-xs text-muted-foreground">Loading schools...</p>
+                    ) : schools.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">No schools available yet. Create a new one.</p>
+                    ) : (
+                      <select
+                        className="w-full px-3 py-2 rounded-md border border-input bg-background text-sm"
+                        value={schoolMode === "existing" ? selectedSchoolId : "__new__"}
+                        onChange={(e) => handleSchoolSelect(e.target.value)}
+                        disabled={isLoading}
+                      >
+                        <option value="">Select a school</option>
+                        {schools.map((school) => (
+                          <option key={school.id} value={school.id}>
+                            {school.name}
+                          </option>
+                        ))}
+                        <option value="__new__">+ Create new school</option>
+                      </select>
+                    )}
+                  </div>
+                  {schoolMode === "new" && (
+                    <Input
+                      id="schoolName"
+                      name="schoolName"
+                      type="text"
+                      placeholder="New School Name"
+                      value={formData.schoolName}
+                      onChange={handleChange}
+                      disabled={isLoading}
+                      className="bg-background"
+                    />
+                  )}
+                  {schoolMode === "existing" && (
+                    <div>
+                      <Label htmlFor="role" className="text-xs font-medium text-muted-foreground">
+                        Role
+                      </Label>
+                      <select
+                        id="role"
+                        className="mt-1 w-full px-3 py-2 rounded-md border border-input bg-background text-sm"
+                        value={role}
+                        onChange={(e) => setRole(e.target.value as "TEACHER" | "STAFF")}
+                        disabled={isLoading}
+                      >
+                        <option value="TEACHER">Teacher</option>
+                        <option value="STAFF">Staff</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Password */}

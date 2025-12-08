@@ -1,14 +1,17 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import prisma from '../config/database';
-import { authenticateToken } from '../middleware/auth';
+import { authenticateToken, AuthRequest } from '../middleware/auth';
+import { UserRole } from '@prisma/client';
+import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
 
 const router = Router();
 
 // Get dashboard stats
-router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
+router.get('/stats', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
 
     const [
       totalStudents,
@@ -19,38 +22,54 @@ router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
       onlineDevices,
       recentAlerts,
       latestAirQuality,
+      schoolBreakdown,
     ] = await Promise.all([
-      prisma.student.count(),
+      prisma.student.count({ where: schoolId ? { schoolId } : undefined }),
       prisma.attendance.count({
         where: {
           checkInTime: { gte: today },
           status: 'PRESENT',
+          ...(schoolId ? { schoolId } : {}),
         },
       }),
       prisma.attendance.count({
         where: {
           checkInTime: { gte: today },
           status: 'ABSENT',
+          ...(schoolId ? { schoolId } : {}),
         },
       }),
       prisma.attendance.count({
         where: {
           checkInTime: { gte: today },
           status: 'LATE',
+          ...(schoolId ? { schoolId } : {}),
         },
       }),
-      prisma.device.count(),
-      prisma.device.count({ where: { status: 'ONLINE' } }),
+      prisma.device.count({ where: schoolId ? { schoolId } : undefined }),
+      prisma.device.count({ where: { status: 'ONLINE', ...(schoolId ? { schoolId } : {}) } }),
       prisma.alert.findMany({
-        where: { resolved: false },
+        where: { resolved: false, ...(schoolId ? { schoolId } : {}) },
         orderBy: { createdAt: 'desc' },
         take: 10,
       }),
       prisma.airQuality.findMany({
+        where: schoolId ? { schoolId } : undefined,
         orderBy: { timestamp: 'desc' },
         take: 5,
-        include: { device: true },
+        include: { device: true, classroom: true },
       }),
+      req.user?.role === UserRole.PLATFORM_ADMIN && !schoolId
+        ? prisma.school.findMany({
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              name: true,
+              status: true,
+              _count: { select: { students: true, devices: true } },
+            },
+          })
+        : Promise.resolve([]),
     ]);
 
     const presentRate = totalStudents > 0 
@@ -72,6 +91,7 @@ router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
       },
       airQuality: latestAirQuality[0] || null,
       alerts: recentAlerts,
+      schools: schoolBreakdown,
     });
   } catch (error) {
     console.error('Dashboard stats error:', error);
@@ -80,12 +100,21 @@ router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
 });
 
 // Get weekly attendance trend
-router.get('/attendance/weekly', authenticateToken, async (req: Request, res: Response) => {
+router.get('/attendance/weekly', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const endDate = new Date();
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - 6);
     startDate.setHours(0, 0, 0, 0);
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+
+    let classroomFilter: string[] | undefined;
+    if (req.user?.role === UserRole.TEACHER) {
+      classroomFilter = await getTeacherClassroomIds(req.user.id);
+      if (!classroomFilter.length) {
+        return res.json([]);
+      }
+    }
 
     const attendances = await prisma.attendance.findMany({
       where: {
@@ -93,6 +122,8 @@ router.get('/attendance/weekly', authenticateToken, async (req: Request, res: Re
           gte: startDate,
           lte: endDate,
         },
+        ...(schoolId ? { schoolId } : {}),
+        ...(classroomFilter ? { classroomId: { in: classroomFilter } } : {}),
       },
       select: {
         checkInTime: true,
@@ -129,17 +160,28 @@ router.get('/attendance/weekly', authenticateToken, async (req: Request, res: Re
 });
 
 // Get hourly air quality data
-router.get('/airquality/hourly', authenticateToken, async (req: Request, res: Response) => {
+router.get('/airquality/hourly', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+
+    let classroomFilter: string[] | undefined;
+    if (req.user?.role === UserRole.TEACHER) {
+      classroomFilter = await getTeacherClassroomIds(req.user.id);
+      if (!classroomFilter.length) {
+        return res.json([]);
+      }
+    }
 
     const readings = await prisma.airQuality.findMany({
       where: {
         timestamp: { gte: today },
+        ...(schoolId ? { schoolId } : {}),
+        ...(classroomFilter ? { classroomId: { in: classroomFilter } } : {}),
       },
       orderBy: { timestamp: 'asc' },
-      include: { device: true },
+      include: { device: true, classroom: true },
     });
 
     // Group by hour
@@ -180,14 +222,28 @@ router.get('/airquality/hourly', authenticateToken, async (req: Request, res: Re
 });
 
 // Get classroom status
-router.get('/classrooms', authenticateToken, async (req: Request, res: Response) => {
+router.get('/classrooms', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+
+    let classroomFilter: string[] | undefined;
+    if (req.user?.role === UserRole.TEACHER) {
+      classroomFilter = await getTeacherClassroomIds(req.user.id);
+      if (!classroomFilter.length) {
+        return res.json([]);
+      }
+    }
 
     const devices = await prisma.device.findMany({
-      where: { status: 'ONLINE' },
+      where: {
+        status: 'ONLINE',
+        ...(schoolId ? { schoolId } : {}),
+        ...(classroomFilter ? { classroomId: { in: classroomFilter } } : {}),
+      },
       include: {
+        classroom: true,
         airQualityReadings: {
           orderBy: { timestamp: 'desc' },
           take: 1,
@@ -202,6 +258,7 @@ router.get('/classrooms', authenticateToken, async (req: Request, res: Response)
             deviceId: device.id,
             checkInTime: { gte: today },
             status: 'PRESENT',
+            ...(schoolId ? { schoolId } : {}),
           },
         });
 
@@ -211,10 +268,11 @@ router.get('/classrooms', authenticateToken, async (req: Request, res: Response)
             ? 'Good'
             : 'Moderate'
           : 'Unknown';
+        const capacity = device.classroom?.capacity || 45;
 
         return {
           room: device.location,
-          occupancy: `${attendance}/45`,
+          occupancy: `${attendance}/${capacity}`,
           airQuality,
           temp: latestReading ? `${latestReading.temperature.toFixed(1)}°C` : 'N/A',
           humidity: latestReading ? `${latestReading.humidity.toFixed(0)}%` : 'N/A',

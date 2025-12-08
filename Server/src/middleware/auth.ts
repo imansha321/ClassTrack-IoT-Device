@@ -1,14 +1,17 @@
 import jwt from 'jsonwebtoken';
 import { Request, Response, NextFunction } from 'express';
+import { UserRole } from '@prisma/client';
 
 export interface AuthRequest extends Request {
   user?: {
     id: string;
     email: string;
-    role: string;
+    role: UserRole;
+    schoolId?: string;
   };
   device?: {
     deviceId: string;
+    schoolId?: string;
   };
 }
 
@@ -33,14 +36,14 @@ export const authenticateToken = (
   }
 };
 
-export const generateToken = (payload: { id: string; email: string; role: string }): string => {
+export const generateToken = (payload: { id: string; email: string; role: UserRole; schoolId?: string }): string => {
   return jwt.sign(payload, process.env.JWT_SECRET!, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   } as jwt.SignOptions);
 };
 
 // Device token utilities
-export const generateDeviceToken = (payload: { deviceId: string }): string => {
+export const generateDeviceToken = (payload: { deviceId: string; schoolId?: string }): string => {
   return jwt.sign(payload, process.env.JWT_SECRET!, {
     expiresIn: process.env.DEVICE_JWT_EXPIRES_IN || '90d',
   } as jwt.SignOptions);
@@ -59,7 +62,7 @@ export const authenticateDeviceToken = (
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
     if (decoded && decoded.deviceId) {
-      req.device = { deviceId: decoded.deviceId };
+      req.device = { deviceId: decoded.deviceId, schoolId: decoded.schoolId };
       return next();
     }
     return res.status(403).json({ error: 'Invalid device token' });
@@ -68,13 +71,15 @@ export const authenticateDeviceToken = (
   }
 };
 
-export const isAdmin = (
+export const authorizeRoles = (
+  ...roles: UserRole[]
+) => (
   req: AuthRequest,
   res: Response,
   next: NextFunction
 ) => {
-  if (!req.user || req.user.role !== 'ADMIN') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Insufficient role permissions' });
   }
   next();
 };

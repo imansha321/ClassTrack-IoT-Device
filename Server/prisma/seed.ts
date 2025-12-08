@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, UserRole } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -10,20 +10,91 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱 Seeding database...');
 
-  // Create admin user
-  const hashedPassword = await bcrypt.hash('admin123', 10);
-  const admin = await prisma.user.upsert({
-    where: { email: 'admin@school.com' },
+  // Create school tenant
+  const school = await prisma.school.upsert({
+    where: { code: 'demo-school-01' },
     update: {},
     create: {
-      email: 'admin@school.com',
-      password: hashedPassword,
-      fullName: 'Admin User',
-      schoolName: 'Demo School',
-      role: 'ADMIN',
+      name: 'Demo School',
+      code: 'demo-school-01',
+      contactEmail: 'contact@demo.school',
+      contactPhone: '+971-500-0000',
+      address: '123 Demo Street, Dubai',
+      timezone: 'Asia/Dubai',
     },
   });
-  console.log('✓ Created admin user:', admin.email);
+  console.log('✓ Ensured school tenant:', school.name);
+
+  // Create users (platform admin, school admin, teacher)
+  const [platformAdminPassword, schoolAdminPassword, teacherPassword] = await Promise.all([
+    bcrypt.hash('platform123', 10),
+    bcrypt.hash('admin123', 10),
+    bcrypt.hash('teacher123', 10),
+  ]);
+
+  const platformAdmin = await prisma.user.upsert({
+    where: { email: 'platform@classtrack.com' },
+    update: {},
+    create: {
+      email: 'platform@classtrack.com',
+      password: platformAdminPassword,
+      fullName: 'Platform Owner',
+      role: UserRole.PLATFORM_ADMIN,
+    },
+  });
+  console.log('✓ Platform admin:', platformAdmin.email);
+
+  const schoolAdmin = await prisma.user.upsert({
+    where: { email: 'admin@demo.school' },
+    update: {},
+    create: {
+      email: 'admin@demo.school',
+      password: schoolAdminPassword,
+      fullName: 'Demo School Admin',
+      schoolId: school.id,
+      role: UserRole.SCHOOL_ADMIN,
+    },
+  });
+  console.log('✓ School admin:', schoolAdmin.email);
+
+  const teacher = await prisma.user.upsert({
+    where: { email: 'teacher@demo.school' },
+    update: {},
+    create: {
+      email: 'teacher@demo.school',
+      password: teacherPassword,
+      fullName: 'Class Teacher',
+      schoolId: school.id,
+      role: UserRole.TEACHER,
+    },
+  });
+  console.log('✓ Teacher user:', teacher.email);
+
+  // Create classrooms
+  const classroomDefs = [
+    { name: 'Room 101', grade: '10', section: 'A', capacity: 40 },
+    { name: 'Room 102', grade: '10', section: 'B', capacity: 42 },
+    { name: 'Room 103', grade: '11', section: 'A', capacity: 38 },
+  ];
+
+  const classrooms = [] as Awaited<ReturnType<typeof prisma.classroom.create>>[];
+  for (const def of classroomDefs) {
+    const classroom = await prisma.classroom.create({
+      data: { ...def, schoolId: school.id },
+    });
+    classrooms.push(classroom);
+  }
+  console.log(`✓ Created ${classrooms.length} classrooms`);
+
+  await prisma.teacherClassAssignment.createMany({
+    data: classrooms.slice(0, 2).map((classroom) => ({
+      teacherId: teacher.id,
+      classroomId: classroom.id,
+      schoolId: school.id,
+    })),
+    skipDuplicates: true,
+  });
+  console.log('✓ Linked teacher to classrooms');
 
   // Create students
   const students = [];
@@ -35,12 +106,15 @@ async function main() {
   ];
 
   for (let i = 0; i < names.length; i++) {
+    const classroom = classrooms[i % classrooms.length];
     const student = await prisma.student.create({
       data: {
         studentId: `STU${String(i + 1).padStart(4, '0')}`,
         name: names[i],
         class: classes[i % classes.length],
         fingerprintData: `FP_${i + 1}_DATA`,
+        schoolId: school.id,
+        classroomId: classroom.id,
       },
     });
     students.push(student);
@@ -63,6 +137,8 @@ async function main() {
         ...deviceData,
         uptime: deviceData.status === 'OFFLINE' ? null : '45 days',
         lastSeen: deviceData.status === 'OFFLINE' ? new Date(Date.now() - 2 * 60 * 60 * 1000) : new Date(),
+        schoolId: school.id,
+        classroomId: classrooms[createdDevices.length % classrooms.length].id,
       },
     });
     createdDevices.push(device);
@@ -82,6 +158,8 @@ async function main() {
       await prisma.attendance.create({
         data: {
           studentId: students[i].id,
+          schoolId: school.id,
+          classroomId: students[i].classroomId,
           checkInTime,
           status,
           fingerprintMatch: true,
@@ -103,6 +181,8 @@ async function main() {
       await prisma.airQuality.create({
         data: {
           deviceId: createdDevices[i % createdDevices.length].id,
+          schoolId: school.id,
+          classroomId: classrooms[i % classrooms.length].id,
           room: rooms[i],
           pm25: 20 + Math.random() * 45,
           co2: 400 + Math.floor(Math.random() * 450),
@@ -143,7 +223,7 @@ async function main() {
   ];
 
   for (const alertData of alerts) {
-    await prisma.alert.create({ data: alertData });
+    await prisma.alert.create({ data: { ...alertData, schoolId: school.id } });
   }
   console.log('✓ Created alerts');
 

@@ -11,51 +11,148 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
+  id        String    @id @default(uuid())
+  email     String    @unique
   password  String
   fullName  String
-  schoolName String
-  role      Role     @default(ADMIN)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  role      UserRole  @default(SCHOOL_ADMIN)
+  schoolId  String?
+  school    School?   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classes   TeacherClassAssignment[] @relation("TeacherAssignments")
+  taughtAttendances Attendance[]      @relation("AttendanceTeacher")
+  requestedEnrollments FingerprintEnrollment[] @relation("RequestedEnrollments")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
+  @@index([schoolId])
   @@map("users")
 }
 
-enum Role {
-  ADMIN
+enum UserRole {
+  PLATFORM_ADMIN
+  SCHOOL_ADMIN
   TEACHER
   STAFF
 }
 
+model School {
+  id           String         @id @default(uuid())
+  name         String
+  code         String         @unique
+  address      String?
+  contactEmail String?
+  contactPhone String?
+  timezone     String?        @default("UTC")
+  status       SchoolStatus   @default(ACTIVE)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  users        User[]
+  classrooms   Classroom[]
+  students     Student[]
+  devices      Device[]
+  attendances  Attendance[]
+  airQualityReadings   AirQuality[]
+  alerts       Alert[]
+  logs         SystemLog[]
+  teacherAssignments TeacherClassAssignment[]
+  fingerprintEnrollments FingerprintEnrollment[]
+
+  @@map("schools")
+}
+
+enum SchoolStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+model Classroom {
+  id          String       @id @default(uuid())
+  name        String
+  grade       String?
+  section     String?
+  capacity    Int?
+  schoolId    String
+  school      School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  students    Student[]
+  devices     Device[]
+  attendances Attendance[]
+  airQualityReadings  AirQuality[]
+  teachers    TeacherClassAssignment[]
+  fingerprintEnrollments FingerprintEnrollment[]
+
+  @@index([schoolId])
+  @@map("classrooms")
+}
+
+model TeacherClassAssignment {
+  id          String     @id @default(uuid())
+  teacherId   String
+  classroomId String
+  schoolId    String
+  teacher     User       @relation("TeacherAssignments", fields: [teacherId], references: [id], onDelete: Cascade)
+  classroom   Classroom  @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  school      School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdAt   DateTime   @default(now())
+
+  @@unique([teacherId, classroomId])
+  @@index([schoolId])
+  @@map("teacher_class_assignments")
+}
+
 model Student {
-  id              String   @id @default(uuid())
-  studentId       String   @unique
+  id              String        @id @default(uuid())
+  studentId       String        @unique
   name            String
-  class           String
+  class           String        @default("-")
   fingerprintData String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  status          StudentStatus @default(ACTIVE)
+  schoolId        String
+  classroomId     String?
+  school          School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroom       Classroom?    @relation(fields: [classroomId], references: [id])
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
   
   attendances     Attendance[]
+    fingerprintEnrollments FingerprintEnrollment[]
 
+  @@index([schoolId])
+  @@index([classroomId])
   @@map("students")
 }
 
+enum StudentStatus {
+  ACTIVE
+  INACTIVE
+  TRANSFERRED
+}
+
 model Attendance {
-  id                String   @id @default(uuid())
+  id                String            @id @default(uuid())
   studentId         String
-  student           Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  student           Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  schoolId          String
+  school            School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroomId       String?
+  classroom         Classroom?        @relation(fields: [classroomId], references: [id])
+  teacherId         String?
+  teacher           User?             @relation("AttendanceTeacher", fields: [teacherId], references: [id])
+  deviceId          String?
+  device            Device?           @relation(fields: [deviceId], references: [id])
   checkInTime       DateTime
   status            AttendanceStatus
-  fingerprintMatch  Boolean  @default(true)
-  reliability       Int      @default(98)
-  deviceId          String?
-  device            Device?  @relation(fields: [deviceId], references: [id])
-  createdAt         DateTime @default(now())
+  fingerprintMatch  Boolean           @default(true)
+  reliability       Int               @default(98)
+  createdAt         DateTime          @default(now())
 
   @@index([studentId])
+  @@index([schoolId])
+  @@index([classroomId])
   @@index([checkInTime])
   @@map("attendances")
 }
@@ -67,23 +164,30 @@ enum AttendanceStatus {
 }
 
 model Device {
-  id              String   @id @default(uuid())
-  deviceId        String   @unique
-  name            String
-  type            DeviceType
-  location        String
-  status          DeviceStatus @default(ONLINE)
-  battery         Int      @default(100)
-  signal          Int      @default(100)
-  lastSeen        DateTime @default(now())
-  uptime          String?
-  firmwareVersion String   @default("v2.1.3")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                 String      @id @default(uuid())
+  deviceId           String      @unique
+  name               String
+  type               DeviceType
+  location           String
+  schoolId           String
+  classroomId        String?
+  school             School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroom          Classroom?  @relation(fields: [classroomId], references: [id])
+  status             DeviceStatus @default(ONLINE)
+  battery            Int         @default(100)
+  signal             Int         @default(100)
+  lastSeen           DateTime    @default(now())
+  uptime             String?
+  firmwareVersion    String      @default("v2.1.3")
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
-  attendances     Attendance[]
+  attendances        Attendance[]
   airQualityReadings AirQuality[]
+  fingerprintEnrollments FingerprintEnrollment[]
 
+  @@index([schoolId])
+  @@index([classroomId])
   @@map("devices")
 }
 
@@ -99,34 +203,78 @@ enum DeviceStatus {
   MAINTENANCE
 }
 
+enum FingerprintEnrollmentStatus {
+  PENDING
+  CAPTURING
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+model FingerprintEnrollment {
+  id          String                       @id @default(uuid())
+  studentId   String
+  student     Student                      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  schoolId    String
+  school      School                       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroomId String?
+  classroom   Classroom?                   @relation(fields: [classroomId], references: [id])
+  deviceId    String?
+  device      Device?                      @relation(fields: [deviceId], references: [id])
+  status      FingerprintEnrollmentStatus  @default(PENDING)
+  template    String?
+  requestedBy String?
+  requestedByUser User?                    @relation("RequestedEnrollments", fields: [requestedBy], references: [id])
+  expiresAt   DateTime?
+  completedAt DateTime?
+  failureReason String?
+  createdAt   DateTime                     @default(now())
+  updatedAt   DateTime                     @updatedAt
+
+  @@index([schoolId])
+  @@index([classroomId])
+  @@index([studentId])
+  @@index([status])
+  @@map("fingerprint_enrollments")
+}
+
 model AirQuality {
-  id          String   @id @default(uuid())
+  id          String     @id @default(uuid())
   deviceId    String
-  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  device      Device     @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  schoolId    String
+  school      School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroomId String?
+  classroom   Classroom? @relation(fields: [classroomId], references: [id])
   room        String
   pm25        Float
   co2         Int
   temperature Float
   humidity    Float
-  timestamp   DateTime @default(now())
+  timestamp   DateTime   @default(now())
 
+  @@index([schoolId])
+  @@index([classroomId])
   @@index([deviceId])
   @@index([timestamp])
   @@map("air_quality")
 }
 
 model Alert {
-  id        String      @id @default(uuid())
+  id        String        @id @default(uuid())
   type      AlertType
   severity  AlertSeverity
   message   String
+  schoolId  String?
+  school    School?       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   room      String?
   metric    String?
   value     String?
   threshold String?
-  resolved  Boolean   @default(false)
-  createdAt DateTime  @default(now())
+  resolved  Boolean       @default(false)
+  createdAt DateTime      @default(now())
 
+  @@index([schoolId])
   @@index([createdAt])
   @@map("alerts")
 }
@@ -142,4 +290,19 @@ enum AlertSeverity {
   INFO
   WARNING
   CRITICAL
+}
+
+model SystemLog {
+  id        String    @id @default(uuid())
+  schoolId  String?
+  school    School?   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  actorId   String?
+  actorRole UserRole?
+  action    String
+  metadata  Json?
+  createdAt DateTime  @default(now())
+
+  @@index([schoolId])
+  @@index([createdAt])
+  @@map("system_logs")
 }

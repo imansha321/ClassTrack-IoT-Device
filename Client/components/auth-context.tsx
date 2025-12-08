@@ -1,22 +1,26 @@
 "use client"
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
-import { AuthAPI } from "@/lib/api"
+import { AuthAPI, type SignupPayload } from "@/lib/api"
+
+export type UserRole = "PLATFORM_ADMIN" | "SCHOOL_ADMIN" | "TEACHER" | "STAFF"
 
 interface User {
   id: string
   email: string
   fullName: string
-  schoolName: string
-  role: "ADMIN" | "TEACHER" | "STAFF"
+  schoolName?: string | null
+  schoolId?: string | null
+  role: UserRole
 }
 
 interface AuthContextType {
   user: User | null
   isAuthenticated: boolean
   isLoading: boolean
+  hasHydrated: boolean
   login: (email: string, password: string) => Promise<void>
-  signup: (fullName: string, email: string, schoolName: string, password: string) => Promise<void>
+  signup: (payload: SignupPayload) => Promise<void>
   logout: () => void
 }
 
@@ -25,6 +29,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [hasHydrated, setHasHydrated] = useState(false)
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -34,6 +39,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(JSON.parse(storedUser))
       }
     } catch {}
+    setHasHydrated(true)
   }, [])
 
   const login = async (email: string, password: string) => {
@@ -50,10 +56,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  const signup = async (fullName: string, email: string, schoolName: string, password: string) => {
+  const signup = async (payload: SignupPayload) => {
     setIsLoading(true)
     try {
-      const { user, token } = await AuthAPI.signup(fullName, email, schoolName, password)
+      const { user, token } = await AuthAPI.signup(payload)
       if (typeof window !== "undefined") {
         localStorage.setItem("classtrack:token", token)
         localStorage.setItem("classtrack:user", JSON.stringify(user))
@@ -78,6 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user,
         isAuthenticated: !!user,
         isLoading,
+        hasHydrated,
         login,
         signup,
         logout,

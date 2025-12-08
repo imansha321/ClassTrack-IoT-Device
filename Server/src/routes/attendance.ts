@@ -1,18 +1,24 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { body } from 'express-validator';
+import { UserRole } from '@prisma/client';
 import prisma from '../config/database';
-import { authenticateToken, authenticateDeviceToken, AuthRequest } from '../middleware/auth';
+import { authenticateToken, authenticateDeviceToken, AuthRequest, authorizeRoles } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
 
 const router = Router();
 
 // Get attendance records
-router.get('/', authenticateToken, async (req: Request, res: Response) => {
+router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { date, class: className } = req.query;
-    
+    const { date, class: className, classroomId } = req.query;
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+
     const where: any = {};
-    
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
+
     if (date) {
       const targetDate = new Date(date as string);
       const nextDay = new Date(targetDate);
@@ -24,22 +30,43 @@ router.get('/', authenticateToken, async (req: Request, res: Response) => {
       };
     }
 
+    let classroomFilter: string[] | undefined;
+    if (classroomId) {
+      classroomFilter = [classroomId as string];
+    }
+
+    if (className && className !== 'all') {
+      where.student = { class: className as string };
+    }
+
+    if (req.user?.role === UserRole.TEACHER) {
+      const assignments = await getTeacherClassroomIds(req.user.id);
+      if (assignments.length === 0) {
+        return res.json([]);
+      }
+      classroomFilter = classroomFilter
+        ? classroomFilter.filter((id) => assignments.includes(id))
+        : assignments;
+      if (classroomFilter.length === 0) {
+        return res.json([]);
+      }
+    }
+
+    if (classroomFilter && classroomFilter.length > 0) {
+      where.classroomId = classroomFilter.length === 1 ? classroomFilter[0] : { in: classroomFilter };
+    }
+
     const attendances = await prisma.attendance.findMany({
       where,
       include: {
         student: true,
         device: true,
+        classroom: true,
       },
       orderBy: { checkInTime: 'desc' },
     });
 
-    // Filter by class if provided
-    let filteredAttendances = attendances;
-    if (className && className !== 'all') {
-      filteredAttendances = attendances.filter(a => a.student.class === className);
-    }
-
-    res.json(filteredAttendances);
+    res.json(attendances);
   } catch (error) {
     console.error('Get attendance error:', error);
     res.status(500).json({ error: 'Failed to fetch attendance records' });
@@ -49,23 +76,40 @@ router.get('/', authenticateToken, async (req: Request, res: Response) => {
 // Record attendance (from ESP32)
 router.post(
   '/',
+  authenticateToken,
+  authorizeRoles(UserRole.SCHOOL_ADMIN, UserRole.PLATFORM_ADMIN, UserRole.STAFF, UserRole.TEACHER),
   [
     body('studentId').notEmpty().withMessage('Student ID is required'),
     body('deviceId').notEmpty().withMessage('Device ID is required'),
     body('fingerprintMatch').isBoolean().withMessage('Fingerprint match must be boolean'),
     validate,
   ],
-  async (req: Request, res: Response) => {
+  async (req: AuthRequest, res: Response) => {
     try {
       const { studentId, deviceId, fingerprintMatch, reliability } = req.body;
 
       // Find student
       const student = await prisma.student.findUnique({
         where: { studentId },
+        include: { classroom: true },
       });
 
       if (!student) {
         return res.status(404).json({ error: 'Student not found' });
+      }
+
+      if (req.user?.role !== UserRole.PLATFORM_ADMIN) {
+        const schoolId = req.user?.schoolId;
+        if (!schoolId || schoolId !== student.schoolId) {
+          return res.status(403).json({ error: 'Student belongs to another school' });
+        }
+      }
+
+      if (req.user?.role === UserRole.TEACHER) {
+        const assignments = await getTeacherClassroomIds(req.user.id);
+        if (student.classroomId && !assignments.includes(student.classroomId)) {
+          return res.status(403).json({ error: 'Teacher is not assigned to this class' });
+        }
       }
 
       // Find device
@@ -75,6 +119,10 @@ router.post(
 
       if (!device) {
         return res.status(404).json({ error: 'Device not found' });
+      }
+
+      if (device.schoolId !== student.schoolId) {
+        return res.status(400).json({ error: 'Device is not mapped to the same school as the student' });
       }
 
       // Determine status based on time
@@ -91,6 +139,9 @@ router.post(
         data: {
           studentId: student.id,
           deviceId: device.id,
+          schoolId: student.schoolId,
+          classroomId: student.classroomId,
+          teacherId: req.user?.role === UserRole.TEACHER ? req.user.id : undefined,
           checkInTime: now,
           status,
           fingerprintMatch,
@@ -98,6 +149,7 @@ router.post(
         },
         include: {
           student: true,
+          classroom: true,
         },
       });
 
@@ -127,7 +179,7 @@ router.post(
         return res.status(401).json({ error: 'Device token missing deviceId' });
       }
 
-      const student = await prisma.student.findUnique({ where: { studentId } });
+      const student = await prisma.student.findUnique({ where: { studentId }, include: { classroom: true } });
       if (!student) {
         return res.status(404).json({ error: 'Student not found' });
       }
@@ -135,6 +187,10 @@ router.post(
       const device = await prisma.device.findUnique({ where: { deviceId: tokenDeviceId } });
       if (!device) {
         return res.status(404).json({ error: 'Device not found' });
+      }
+
+      if (device.schoolId !== student.schoolId) {
+        return res.status(400).json({ error: 'Device is not mapped to the same school as the student' });
       }
 
       const now = new Date();
@@ -148,12 +204,14 @@ router.post(
         data: {
           studentId: student.id,
           deviceId: device.id,
+          schoolId: student.schoolId,
+          classroomId: student.classroomId,
           checkInTime: now,
           status,
           fingerprintMatch,
           reliability: reliability || 98,
         },
-        include: { student: true },
+        include: { student: true, classroom: true },
       });
 
       res.status(201).json(attendance);
@@ -165,16 +223,28 @@ router.post(
 );
 
 // Get attendance statistics
-router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
+router.get('/stats', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { startDate, endDate } = req.query;
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
     
     const where: any = {};
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
     if (startDate && endDate) {
       where.checkInTime = {
         gte: new Date(startDate as string),
         lte: new Date(endDate as string),
       };
+    }
+
+    if (req.user?.role === UserRole.TEACHER) {
+      const assignments = await getTeacherClassroomIds(req.user.id);
+      if (!assignments.length) {
+        return res.json({ total: 0, present: 0, absent: 0, late: 0, presentRate: '0.0' });
+      }
+      where.classroomId = { in: assignments };
     }
 
     const [total, present, absent, late] = await Promise.all([
@@ -198,24 +268,37 @@ router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
 });
 
 // Get student attendance history
-router.get('/student/:studentId', authenticateToken, async (req: Request, res: Response) => {
+router.get('/student/:studentId', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { studentId } = req.params;
     const { limit = 10 } = req.query;
 
     const student = await prisma.student.findUnique({
       where: { studentId },
+      select: { id: true, schoolId: true, classroomId: true },
     });
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+    if (schoolId && schoolId !== student.schoolId && req.user?.role !== UserRole.PLATFORM_ADMIN) {
+      return res.status(403).json({ error: 'Student belongs to another school' });
+    }
+
+    if (req.user?.role === UserRole.TEACHER) {
+      const assignments = await getTeacherClassroomIds(req.user.id);
+      if (student.classroomId && !assignments.includes(student.classroomId)) {
+        return res.status(403).json({ error: 'Student belongs to another classroom' });
+      }
+    }
+
     const attendances = await prisma.attendance.findMany({
       where: { studentId: student.id },
       orderBy: { checkInTime: 'desc' },
       take: Number(limit),
-      include: { device: true },
+      include: { device: true, classroom: true },
     });
 
     res.json(attendances);

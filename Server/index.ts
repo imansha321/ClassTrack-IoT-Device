@@ -21,6 +21,8 @@ import airQualityRoutes from './src/routes/airquality';
 import alertRoutes from './src/routes/alerts';
 import reportRoutes from './src/routes/reports';
 import adminRoutes from './src/routes/admin';
+import classroomRoutes from './src/routes/classrooms';
+import fingerprintRoutes from './src/routes/fingerprint';
 
 // Initialize Express app
 const app = express();
@@ -33,6 +35,7 @@ app.use(cors({
   origin: process.env.CORS_ORIGIN || '*',
   credentials: true,
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
@@ -52,6 +55,8 @@ app.use('/api/airquality', airQualityRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/classrooms', classroomRoutes);
+app.use('/api/fingerprint', fingerprintRoutes);
 
 // Proxy to Next.js dev server in development, serve static files in production
 if (isDevelopment) {

@@ -38,54 +38,68 @@ ClassTrack is a modern, full-stack solution that combines fingerprint-based atte
 - Temperature and humidity sensing
 - Room-by-room environmental comparison
 - Automatic threshold alerts
-- Historical trend analysis
+## 🔌 API Endpoints
 
-### 📱 IoT Device Management
+> ℹ️ Platform admins can pass `?schoolId=...` to scope any tenant-aware endpoint. School admins and teachers are automatically restricted to their school/class assignments.
 
-- ESP32 device registration and monitoring
-- Battery and signal strength tracking
-- Firmware version management
-- Device uptime monitoring
-- Remote status updates
-- Health diagnostics
+### Authentication
 
-### 🚨 Smart Alerts
+- `POST /api/auth/signup` - Onboard a new school admin + tenant
+- `POST /api/auth/login` - Login and receive scoped JWT
 
-- Automatic threshold violation detection
-- Configurable alert severity levels
-- Alert resolution tracking
-- Multiple alert types (Air Quality, Device, System)
-- Real-time notifications
+### Dashboard
 
-### 📈 Comprehensive Reports
+- `GET /api/dashboard/stats` - Overview statistics (global or per-school)
+- `GET /api/dashboard/attendance/weekly` - Weekly attendance trends
+- `GET /api/dashboard/airquality/hourly` - Hourly AQ snapshots
+- `GET /api/dashboard/classrooms` - Classroom occupancy + environment
 
-- Attendance reports by date, class, or student
-- Air quality reports with statistics
-- Device health reports
-- Exportable data for further analysis
-- Custom date range selection
+### Students
 
-## 🏗️ Architecture
+- `GET /api/students` - List students (filters: class, classroom, search)
+- `POST /api/students` - Create student (honors school & classroom scope)
+- `GET /api/students/:id` - Student detail with classroom reference
+- `PUT /api/students/:id` - Update student metadata/fingerprint
+- `DELETE /api/students/:id` - Remove student
 
-```
-ClassTrack/
-├── .env                    # ✨ Single unified configuration
-├── .env.example           # Configuration template
-├── package.json           # Root package with unified scripts
-├── CONFIG.md             # Detailed configuration guide
-│
-├── Client/                # Next.js 16 Frontend
-│   ├── app/              # Next.js App Router
-│   ├── components/       # React components
-│   ├── hooks/           # Custom React hooks
-│   └── lib/             # Utility functions
-│
-├── Server/               # Node.js/Express Backend
-│   ├── src/
-│   │   ├── routes/      # 8 API route files
+### Classrooms
+
+- `GET /api/classrooms` - List classrooms (teachers see assigned ones)
+- `POST /api/classrooms` - Create classroom (school admin)
+- `GET /api/classrooms/:id` - Detail view (students, devices, teachers)
+- `PATCH /api/classrooms/:id` - Update classroom metadata
+- `DELETE /api/classrooms/:id` - Delete classroom
+- `POST /api/classrooms/:id/teachers` - Assign teacher to classroom
+- `DELETE /api/classrooms/:id/teachers/:teacherId` - Remove assignment
+
+### Attendance
+
+- `GET /api/attendance` - Filterable attendance feed (date/class/classroom)
+- `POST /api/attendance` - Record attendance via dashboard or IoT proxy
+- `POST /api/attendance/device` - Record via device JWT
+- `GET /api/attendance/stats` - Aggregated stats for scoped school/classes
+- `GET /api/attendance/student/:studentId` - Student history
+
+### Devices
+
+- `GET /api/devices` - List school devices (teachers limited to assigned rooms)
+- `POST /api/devices` - Register device with school/classroom mapping
+- `GET /api/devices/:id` - Device detail (attendance + AQ history)
+- `PUT /api/devices/:id` - Update metadata / status
+- `DELETE /api/devices/:id` - Remove device
+- `POST /api/devices/status` - Device heartbeat + health updates
+- `POST /api/devices/provision` - Generate device runtime JWT tied to school
+
+### Air Quality
+
+- `GET /api/airquality` - Readings feed (room/classroom filters)
+- `POST /api/airquality` - Record reading via authenticated user
+- `POST /api/airquality/device` - Record via device JWT
+- `GET /api/airquality/rooms` - Latest + 24h averages per room
+- `GET /api/airquality/stats` - Aggregate stats for scoped school
+
 │   │   ├── middleware/  # Auth & validation
 │   │   └── config/      # Database configuration
-│   ├── prisma/          # Database schema & migrations
 │   └── index.ts         # ⭐ Unified server (API + Frontend)
 │
 └── esp32-example.ino    # IoT device code
@@ -94,6 +108,13 @@ ClassTrack/
 ## 🛠️ Technology Stack
 
 ### Frontend
+
+### Platform Admin
+
+- `GET /api/admin/overview` - Global KPIs + latest logs
+- `GET /api/admin/users` / `PATCH` / `DELETE` - Manage any user + role
+- `GET /api/admin/schools` / `POST` / `PATCH` - Manage tenants
+- `GET /api/admin/logs` - Review `SystemLog` timeline
 
 - **Framework:** Next.js 16 (React 19)
 - **Styling:** Tailwind CSS 4
@@ -170,8 +191,9 @@ npm start        # Unified server on port 5000
 
 ### Default Login Credentials
 
-- **Email:** admin@school.com
-- **Password:** admin123
+- **Platform Owner:** `platform@classtrack.com` / `platform123`
+- **Demo School Admin:** `admin@demo.school` / `admin123`
+- **Lead Teacher:** `teacher@demo.school` / `teacher123`
 
 ## 🔧 Configuration
 
@@ -356,36 +378,53 @@ ESP32 devices communicate via WebSocket (port 8080):
 
 ### Core Models
 
-**User** - Admin accounts
+**School** – Tenant metadata
 
-- id, name, email, password (hashed), role
-- Authentication via JWT
+- id, name, code, timezone, status, contact info
+- Owns classrooms, students, devices, alerts, logs
 
-**Student** - Student records
+**User** – Platform admins, school admins, teachers, staff
 
-- id, studentId, name, class, fingerprintData
-- Linked to attendance records
+- id, email, password, role, optional schoolId
+- Teachers map to classrooms via `TeacherClassAssignment`
 
-**Attendance** - Daily logs
+**Classroom** – Grade/section container within a school
 
-- id, studentId, deviceId, timestamp, status, reliability
-- Auto-status: Present/Late/Absent based on time
+- id, name, grade, section, capacity, schoolId
+- Connected to students, devices, air quality readings, attendance
 
-**Device** - ESP32 registry
+**TeacherClassAssignment** – Joins teachers to classrooms
 
-- id, deviceId, name, type, classroom, status, battery, signal
-- Types: FINGERPRINT, AIR_QUALITY
+- id, teacherId, classroomId, schoolId
+- Powers teacher-level data isolation
 
-**AirQuality** - Environmental data
+**Student** – Learners tied to a school/classroom
 
-- id, deviceId, room, pm25, co2, temperature, humidity, timestamp
-- Automatic threshold alerts
+- id, studentId, name, class label, fingerprint data, schoolId, classroomId
+- Linked to attendance history
 
-**Alert** - System notifications
+**Attendance** – Daily check-ins
 
-- id, type, severity, message, resolved, timestamp
-- Types: AIR_QUALITY, DEVICE, SYSTEM
-- Severity: LOW, MEDIUM, HIGH, CRITICAL
+- id, studentId, schoolId, classroomId, deviceId, teacherId
+- Auto-determines status (Present/Late/Absent) with reliability score
+
+**Device** – ESP32 registry (fingerprint + multi-sensor)
+
+- id, deviceId, schoolId, classroomId, type, status, battery, signal, firmware
+- Tracks attendance and air quality contributions
+
+**AirQuality** – Environmental data snapshots
+
+- id, deviceId, schoolId, classroomId, room, pm25, co2, temperature, humidity, timestamp
+- Generates alerts on threshold breaches
+
+**Alert** – System notifications
+
+- id, schoolId, type, severity, room, metric, threshold, resolved flag
+
+**SystemLog** – Platform audit/events
+
+- id, schoolId, actorId, actorRole, action, metadata JSON, timestamp
 
 **View complete schema:** [Server/prisma/schema.prisma](./Server/prisma/schema.prisma)
 

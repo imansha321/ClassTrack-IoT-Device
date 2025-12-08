@@ -31,6 +31,7 @@ import {
 import { Sidebar } from "./sidebar"
 import { useEffect, useState } from "react"
 import { DashboardAPI, AlertsAPI, DevicesAPI } from "@/lib/api"
+import { useTenant } from "@/components/tenant-context"
 
 const emptyWeek = ["Mon","Tue","Wed","Thu","Fri"].map(d => ({ date: d, present: 0, absent: 0, late: 0 }))
 
@@ -43,6 +44,7 @@ export function Dashboard({ isMobileMenuOpen, setIsMobileMenuOpen }: any) {
   const [classrooms, setClassrooms] = useState<any[]>([])
   const [alerts, setAlerts] = useState<any[]>([])
   const [devices, setDevices] = useState<any[]>([])
+  const { activeSchool } = useTenant()
 
   const load = async () => {
     try {
@@ -85,7 +87,7 @@ export function Dashboard({ isMobileMenuOpen, setIsMobileMenuOpen }: any) {
           <div>
             <h1 className="text-2xl md:text-3xl font-bold text-foreground">Dashboard</h1>
             <p className="text-sm md:text-base text-muted-foreground mt-2">
-              Welcome back! Here's your school's attendance and air quality overview.
+              {activeSchool ? `Viewing ${activeSchool.name}` : "Choose a school to view multi-tenant analytics."}
             </p>
           </div>
           <div className="flex flex-col md:flex-row gap-2 items-start md:items-center">

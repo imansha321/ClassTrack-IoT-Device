@@ -2,9 +2,10 @@
 
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { BarChart3, Users, Wind, Cpu, FileText, Home, LogOut, Menu, X } from "lucide-react"
+import { BarChart3, Cpu, Home, LogOut, Menu, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/components/auth-context"
+import { TenantSwitcher } from "@/components/tenant-switcher"
 import { Button } from "@/components/ui/button"
 import { useState } from "react"
 
@@ -14,15 +15,17 @@ export function Sidebar() {
   const { user, logout } = useAuth()
   const [isMobileOpen, setIsMobileOpen] = useState(false)
 
+  const isPlatformAdmin = user?.role === 'PLATFORM_ADMIN'
+  const isSchoolAdmin = user?.role === 'SCHOOL_ADMIN'
+
   const links = [
     { href: "/", label: "Dashboard", icon: Home },
-    { href: "/attendance", label: "Attendance", icon: Users },
-    { href: "/students", label: "Students", icon: Users },
-    { href: "/air-quality", label: "Air Quality", icon: Wind },
-    { href: "/devices", label: "Devices", icon: Cpu },
-    { href: "/reports", label: "Reports", icon: FileText },
-      ...(user?.role === 'ADMIN' ? [{ href: "/admin", label: "Admin", icon: BarChart3 }] : []),
-    ]
+    { href: "/classrooms", label: "Classrooms", icon: BarChart3 },
+    ...((isSchoolAdmin || isPlatformAdmin)
+      ? [{ href: "/devices", label: "Devices", icon: Cpu }]
+      : []),
+    ...(isPlatformAdmin ? [{ href: "/admin", label: "Platform", icon: BarChart3 }] : []),
+  ]
 
   const handleLogout = () => {
     logout()
@@ -39,6 +42,11 @@ export function Sidebar() {
           </div>
           <h1 className="text-xl font-bold">ClassTrack</h1>
         </div>
+        {isPlatformAdmin && (
+          <div className="mt-4">
+            <TenantSwitcher />
+          </div>
+        )}
       </div>
 
       {/* Navigation */}
@@ -103,6 +111,7 @@ export function Sidebar() {
           </div>
           <h1 className="text-lg font-bold">ClassTrack</h1>
         </div>
+        {isPlatformAdmin && <TenantSwitcher inline />}
         <Button variant="ghost" size="icon" onClick={() => setIsMobileOpen(!isMobileOpen)} className="lg:hidden">
           {isMobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
         </Button>

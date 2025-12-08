@@ -1,21 +1,29 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { body } from 'express-validator';
 import prisma from '../config/database';
-import { authenticateToken, authenticateDeviceToken, AuthRequest } from '../middleware/auth';
+import { authenticateToken, authenticateDeviceToken, AuthRequest, authorizeRoles } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { AlertType, AlertSeverity } from '@prisma/client';
+import { AlertType, AlertSeverity, UserRole } from '@prisma/client';
+import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
 
 const router = Router();
 
 // Get air quality readings
-router.get('/', authenticateToken, async (req: Request, res: Response) => {
+router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { room, startDate, endDate, limit = 100 } = req.query;
-    
+    const { room, startDate, endDate, limit = 100, classroomId } = req.query;
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+
     const where: any = {};
-    
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
     if (room) {
       where.room = room;
+    }
+    let classroomFilter: string[] | undefined;
+    if (classroomId) {
+      classroomFilter = [classroomId as string];
     }
     
     if (startDate && endDate) {
@@ -25,11 +33,28 @@ router.get('/', authenticateToken, async (req: Request, res: Response) => {
       };
     }
 
+    if (req.user?.role === UserRole.TEACHER) {
+      const assignments = await getTeacherClassroomIds(req.user.id);
+      if (!assignments.length) {
+        return res.json([]);
+      }
+      classroomFilter = classroomFilter
+        ? classroomFilter.filter((id) => assignments.includes(id))
+        : assignments;
+      if (!classroomFilter.length) {
+        return res.json([]);
+      }
+    }
+
+    if (classroomFilter && classroomFilter.length > 0) {
+      where.classroomId = classroomFilter.length === 1 ? classroomFilter[0] : { in: classroomFilter };
+    }
+
     const readings = await prisma.airQuality.findMany({
       where,
       orderBy: { timestamp: 'desc' },
       take: Number(limit),
-      include: { device: true },
+      include: { device: true, classroom: true },
     });
 
     res.json(readings);
@@ -40,9 +65,22 @@ router.get('/', authenticateToken, async (req: Request, res: Response) => {
 });
 
 // Get air quality by room
-router.get('/rooms', authenticateToken, async (req: Request, res: Response) => {
+router.get('/rooms', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+    let classroomFilter: string[] | undefined;
+    if (req.user?.role === UserRole.TEACHER) {
+      classroomFilter = await getTeacherClassroomIds(req.user.id);
+      if (!classroomFilter.length) {
+        return res.json([]);
+      }
+    }
+
     const rooms = await prisma.airQuality.findMany({
+      where: {
+        ...(schoolId ? { schoolId } : {}),
+        ...(classroomFilter ? { classroomId: { in: classroomFilter } } : {}),
+      },
       distinct: ['room'],
       select: { room: true },
     });
@@ -50,14 +88,20 @@ router.get('/rooms', authenticateToken, async (req: Request, res: Response) => {
     const roomsData = await Promise.all(
       rooms.map(async ({ room }) => {
         const latestReading = await prisma.airQuality.findFirst({
-          where: { room },
+          where: {
+            room,
+            ...(schoolId ? { schoolId } : {}),
+            ...(classroomFilter ? { classroomId: { in: classroomFilter } } : {}),
+          },
           orderBy: { timestamp: 'desc' },
-          include: { device: true },
+          include: { device: true, classroom: true },
         });
 
         const avgReadings = await prisma.airQuality.aggregate({
           where: {
             room,
+            ...(schoolId ? { schoolId } : {}),
+            ...(classroomFilter ? { classroomId: { in: classroomFilter } } : {}),
             timestamp: {
               gte: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
             },
@@ -110,6 +154,8 @@ router.get('/rooms', authenticateToken, async (req: Request, res: Response) => {
 // Record air quality reading (from ESP32)
 router.post(
   '/',
+  authenticateToken,
+  authorizeRoles(UserRole.SCHOOL_ADMIN, UserRole.PLATFORM_ADMIN, UserRole.STAFF),
   [
     body('deviceId').notEmpty().withMessage('Device ID is required'),
     body('room').notEmpty().withMessage('Room is required'),
@@ -119,7 +165,7 @@ router.post(
     body('humidity').isFloat({ min: 0, max: 100 }).withMessage('Humidity must be between 0 and 100'),
     validate,
   ],
-  async (req: Request, res: Response) => {
+  async (req: AuthRequest, res: Response) => {
     try {
       const { deviceId, room, pm25, co2, temperature, humidity } = req.body;
 
@@ -131,9 +177,18 @@ router.post(
         return res.status(404).json({ error: 'Device not found' });
       }
 
+      if (req.user?.role !== UserRole.PLATFORM_ADMIN) {
+        const schoolId = req.user?.schoolId;
+        if (!schoolId || schoolId !== device.schoolId) {
+          return res.status(403).json({ error: 'Device belongs to another school' });
+        }
+      }
+
       const reading = await prisma.airQuality.create({
         data: {
           deviceId: device.id,
+          schoolId: device.schoolId,
+          classroomId: device.classroomId,
           room,
           pm25,
           co2,
@@ -171,7 +226,7 @@ router.post(
 
       if (alerts.length > 0) {
         await prisma.alert.createMany({
-          data: alerts,
+          data: alerts.map((alert) => ({ ...alert, schoolId: device.schoolId })),
         });
       }
 
@@ -212,6 +267,8 @@ router.post(
       const reading = await prisma.airQuality.create({
         data: {
           deviceId: device.id,
+          schoolId: device.schoolId,
+          classroomId: device.classroomId,
           room,
           pm25,
           co2,
@@ -244,7 +301,9 @@ router.post(
         });
       }
       if (alerts.length > 0) {
-        await prisma.alert.createMany({ data: alerts });
+        await prisma.alert.createMany({
+          data: alerts.map((alert) => ({ ...alert, schoolId: device.schoolId })),
+        });
       }
 
       res.status(201).json(reading);
@@ -256,11 +315,15 @@ router.post(
 );
 
 // Get air quality statistics
-router.get('/stats', authenticateToken, async (req: Request, res: Response) => {
+router.get('/stats', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { startDate, endDate } = req.query;
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
     
     const where: any = {};
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
     if (startDate && endDate) {
       where.timestamp = {
         gte: new Date(startDate as string),

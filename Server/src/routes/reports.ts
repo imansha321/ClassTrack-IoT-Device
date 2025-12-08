@@ -1,15 +1,21 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import prisma from '../config/database';
-import { authenticateToken } from '../middleware/auth';
+import { authenticateToken, AuthRequest } from '../middleware/auth';
+import { UserRole } from '@prisma/client';
+import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
 
 const router = Router();
 
 // Generate attendance report
-router.get('/attendance', authenticateToken, async (req: Request, res: Response) => {
+router.get('/attendance', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { startDate, endDate, class: className, format = 'json' } = req.query;
+    const { startDate, endDate, class: className, classroomId } = req.query;
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
     
     const where: any = {};
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
     
     if (startDate && endDate) {
       where.checkInTime = {
@@ -18,34 +24,54 @@ router.get('/attendance', authenticateToken, async (req: Request, res: Response)
       };
     }
 
+    if (classroomId) {
+      where.classroomId = classroomId;
+    }
+
+    if (className && className !== 'all') {
+      where.student = { class: className };
+    }
+
+    if (req.user?.role === UserRole.TEACHER) {
+      const assignments = await getTeacherClassroomIds(req.user.id);
+      if (!assignments.length) {
+        return res.json({ summary: {}, byStudent: [], records: [] });
+      }
+      if (where.classroomId) {
+        const requested = Array.isArray(where.classroomId.in) ? where.classroomId.in : [where.classroomId];
+        const allowed = requested.filter((id: string) => assignments.includes(id));
+        if (!allowed.length) {
+          return res.json({ summary: {}, byStudent: [], records: [] });
+        }
+        where.classroomId = allowed.length === 1 ? allowed[0] : { in: allowed };
+      } else {
+        where.classroomId = { in: assignments };
+      }
+    }
+
     const attendances = await prisma.attendance.findMany({
       where,
       include: {
         student: true,
         device: true,
+        classroom: true,
       },
       orderBy: { checkInTime: 'desc' },
     });
 
-    // Filter by class if provided
-    let filteredAttendances = attendances;
-    if (className && className !== 'all') {
-      filteredAttendances = attendances.filter(a => a.student.class === className);
-    }
-
     // Generate summary
     const summary = {
-      totalRecords: filteredAttendances.length,
-      present: filteredAttendances.filter(a => a.status === 'PRESENT').length,
-      absent: filteredAttendances.filter(a => a.status === 'ABSENT').length,
-      late: filteredAttendances.filter(a => a.status === 'LATE').length,
+      totalRecords: attendances.length,
+      present: attendances.filter(a => a.status === 'PRESENT').length,
+      absent: attendances.filter(a => a.status === 'ABSENT').length,
+      late: attendances.filter(a => a.status === 'LATE').length,
       dateRange: { startDate, endDate },
       class: className || 'all',
     };
 
     // Group by student
     const byStudent: any = {};
-    filteredAttendances.forEach(a => {
+    attendances.forEach(a => {
       const key = a.student.studentId;
       if (!byStudent[key]) {
         byStudent[key] = {
@@ -61,7 +87,7 @@ router.get('/attendance', authenticateToken, async (req: Request, res: Response)
     res.json({
       summary,
       byStudent: Object.values(byStudent),
-      records: filteredAttendances,
+      records: attendances,
     });
   } catch (error) {
     console.error('Attendance report error:', error);
@@ -70,11 +96,15 @@ router.get('/attendance', authenticateToken, async (req: Request, res: Response)
 });
 
 // Generate air quality report
-router.get('/airquality', authenticateToken, async (req: Request, res: Response) => {
+router.get('/airquality', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { startDate, endDate, room } = req.query;
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
     
     const where: any = {};
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
     
     if (startDate && endDate) {
       where.timestamp = {
@@ -89,7 +119,7 @@ router.get('/airquality', authenticateToken, async (req: Request, res: Response)
 
     const readings = await prisma.airQuality.findMany({
       where,
-      include: { device: true },
+      include: { device: true, classroom: true },
       orderBy: { timestamp: 'desc' },
     });
 
@@ -172,9 +202,24 @@ router.get('/airquality', authenticateToken, async (req: Request, res: Response)
 });
 
 // Generate device health report
-router.get('/devices', authenticateToken, async (req: Request, res: Response) => {
+router.get('/devices', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    const schoolId = getEffectiveSchoolId(req, req.query.schoolId as string | undefined);
+    const where: any = {};
+    if (schoolId) {
+      where.schoolId = schoolId;
+    }
+
+    if (req.user?.role === UserRole.TEACHER) {
+      const assignments = await getTeacherClassroomIds(req.user.id);
+      if (!assignments.length) {
+        return res.json({ summary: {}, devices: [] });
+      }
+      where.classroomId = { in: assignments };
+    }
+
     const devices = await prisma.device.findMany({
+      where,
       include: {
         _count: {
           select: {
@@ -182,6 +227,7 @@ router.get('/devices', authenticateToken, async (req: Request, res: Response) =>
             airQualityReadings: true,
           },
         },
+        classroom: true,
       },
       orderBy: { name: 'asc' },
     });
