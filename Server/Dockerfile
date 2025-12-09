@@ -1,5 +1,5 @@
 # Stage 1 - Build TS
-FROM node:20-bullseye as builder
+FROM node:20-slim as builder
 
 WORKDIR /app
 
