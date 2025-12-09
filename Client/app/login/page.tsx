@@ -110,20 +110,20 @@ export default function LoginPage() {
             </form>
 
             {/* Divider */}
-            <div className="relative my-6">
+            {/* <div className="relative my-6">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-border"></div>
               </div>
               <div className="relative flex justify-center text-sm">
                 <span className="px-2 bg-background text-muted-foreground">Or</span>
               </div>
-            </div>
+            </div> */}
 
             {/* Alternative Auth */}
-            <Button variant="outline" className="w-full mb-4 bg-transparent" disabled={isLoading}>
+            {/* <Button variant="outline" className="w-full mb-4 bg-transparent" disabled={isLoading}>
               <Fingerprint className="w-4 h-4 mr-2" />
               Continue with Fingerprint
-            </Button>
+            </Button> */}
 
             {/* Footer */}
             <div className="text-center text-sm">

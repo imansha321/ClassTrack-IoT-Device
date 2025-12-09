@@ -34,7 +34,7 @@ jobs:
           username: ${{ secrets.VPS_USERNAME }}
           password: ${{ secrets.VPS_PASSWORD }}
           source: "*.tar"
-          target: "~/multiapp/"
+          target: "~/iot/"
 
       - name: Deploy on VPS
         uses: appleboy/ssh-action@v1.0.3
