@@ -2,11 +2,33 @@ import { Router, Response } from 'express';
 import { body } from 'express-validator';
 import { UserRole } from '@prisma/client';
 import prisma from '../config/database';
-import { authenticateToken, authenticateDeviceToken, AuthRequest, authorizeRoles } from '../middleware/auth';
+import { authenticateToken, authenticateDeviceSecret, AuthRequest, authorizeRoles } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
 
 const router = Router();
+
+const getDayBounds = (date: Date) => {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+};
+
+const dedupeDailyAttendance = <T extends { studentId: string }>(records: T[]): T[] => {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (seen.has(record.studentId)) {
+      continue;
+    }
+    seen.add(record.studentId);
+    unique.push(record);
+  }
+  return unique.reverse();
+};
 
 // Get attendance records
 router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
@@ -66,7 +88,9 @@ router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
       orderBy: { checkInTime: 'desc' },
     });
 
-    res.json(attendances);
+    const responsePayload = date ? dedupeDailyAttendance(attendances) : attendances;
+
+    res.json(responsePayload);
   } catch (error) {
     console.error('Get attendance error:', error);
     res.status(500).json({ error: 'Failed to fetch attendance records' });
@@ -134,6 +158,26 @@ router.post(
 
       const status = timeInMinutes <= cutoffTime ? 'PRESENT' : 'LATE';
 
+      const { start: dayStart, end: dayEnd } = getDayBounds(now);
+      const existingAttendance = await prisma.attendance.findFirst({
+        where: {
+          studentId: student.id,
+          checkInTime: {
+            gte: dayStart,
+            lt: dayEnd,
+          },
+        },
+        include: {
+          student: true,
+          classroom: true,
+        },
+        orderBy: { checkInTime: 'asc' },
+      });
+
+      if (existingAttendance) {
+        return res.status(200).json(existingAttendance);
+      }
+
       // Create attendance record
       const attendance = await prisma.attendance.create({
         data: {
@@ -165,28 +209,38 @@ router.post(
 router.post(
   '/device',
   [
-    authenticateDeviceToken,
-    body('studentId').notEmpty().withMessage('Student ID is required'),
+    authenticateDeviceSecret,
+    body('studentId').optional().isString().withMessage('Student ID must be a string'),
+    body('fingerprintId').optional().isInt({ min: 1 }).withMessage('Fingerprint ID must be a positive integer'),
     body('fingerprintMatch').isBoolean().withMessage('Fingerprint match must be boolean'),
     validate,
   ],
   async (req: AuthRequest, res: Response) => {
     try {
-      const { studentId, fingerprintMatch, reliability } = req.body;
-      const tokenDeviceId = req.device?.deviceId;
+      const { studentId, fingerprintId, fingerprintMatch, reliability } = req.body;
+      const device = req.deviceRecord;
 
-      if (!tokenDeviceId) {
-        return res.status(401).json({ error: 'Device token missing deviceId' });
+      if (!device) {
+        return res.status(404).json({ error: 'Device not registered' });
       }
 
-      const student = await prisma.student.findUnique({ where: { studentId }, include: { classroom: true } });
+      const normalizedFingerprintId =
+        typeof fingerprintId === 'number'
+          ? String(fingerprintId)
+          : typeof fingerprintId === 'string'
+            ? fingerprintId.trim()
+            : undefined;
+
+      if (!studentId && !normalizedFingerprintId) {
+        return res.status(400).json({ error: 'studentId or fingerprintId is required' });
+      }
+
+      const student = studentId
+        ? await prisma.student.findUnique({ where: { studentId }, include: { classroom: true } })
+        : await prisma.student.findFirst({ where: { fingerprintData: normalizedFingerprintId! }, include: { classroom: true } });
+
       if (!student) {
         return res.status(404).json({ error: 'Student not found' });
-      }
-
-      const device = await prisma.device.findUnique({ where: { deviceId: tokenDeviceId } });
-      if (!device) {
-        return res.status(404).json({ error: 'Device not found' });
       }
 
       if (device.schoolId !== student.schoolId) {
@@ -199,6 +253,23 @@ router.post(
       const timeInMinutes = hour * 60 + minute;
       const cutoffTime = 8 * 60 + 30; // 8:30 AM
       const status = timeInMinutes <= cutoffTime ? 'PRESENT' : 'LATE';
+
+      const { start: dayStart, end: dayEnd } = getDayBounds(now);
+      const existingAttendance = await prisma.attendance.findFirst({
+        where: {
+          studentId: student.id,
+          checkInTime: {
+            gte: dayStart,
+            lt: dayEnd,
+          },
+        },
+        include: { student: true, classroom: true },
+        orderBy: { checkInTime: 'asc' },
+      });
+
+      if (existingAttendance) {
+        return res.status(200).json(existingAttendance);
+      }
 
       const attendance = await prisma.attendance.create({
         data: {

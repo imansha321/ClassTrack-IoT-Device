@@ -5,7 +5,6 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiManager.h>
-#include <Preferences.h>
 
 // -------------------- Pins & Interfaces --------------------
 HardwareSerial FingerSerial(2); // Serial2
@@ -20,29 +19,19 @@ int fingerConfidence;
 uint16_t nextEnrollId = 1;
 
 const int ENROLL_BUTTON_PIN = 13;
-const int UI_NEXT_PIN = 12;
-const int UI_PREV_PIN = 14;
-const int ACTION_BUTTON_PIN = 27;
 bool enrollRequested = false;
-bool autoRotateEnabled = true;
 bool enrollInProgress = false;
-String homeToast = "";
-unsigned long homeToastMs = 0;
-const unsigned long HOME_TOAST_DURATION_MS = 2000;
+bool idleScreenDrawn = false;
 
 // Debounce
 unsigned long lastBtnMs = 0;
 const unsigned long BTN_DEBOUNCE_MS = 200;
 
 // WiFi / Backend
-Preferences prefs;
-String jwtToken = "";
-String deviceToken = "";
-String deviceId = "DEVICE-001";
-String roomName = "Room-1";
+String deviceId = "a09a224d50";
 
 // Avoid trailing slash to prevent double slashes when building URLs
-const char *serverBase = "https://4e131f99b938.ngrok-free.app";
+const char *serverBase = "https://44cfef9f5433.ngrok-free.app";
 
 // Timing
 unsigned long lastAQMs = 0;
@@ -51,17 +40,6 @@ unsigned long lastAttendancePostMs = 0;
 const unsigned long ATTENDANCE_COOLDOWN_MS = 3000;
 
 // UI
-enum UiScreen
-{
-    UI_HOME,
-    UI_WIFI,
-    UI_AIR,
-    UI_FINGER,
-    UI_DEVICE
-};
-UiScreen currentScreen = UI_HOME;
-unsigned long lastUiRotateMs = 0;
-const unsigned long UI_ROTATE_MS = 4000;
 
 struct EnrollmentJob
 {
@@ -76,13 +54,23 @@ EnrollmentJob currentEnrollment{false, "", "", "", ""};
 unsigned long lastEnrollmentPollMs = 0;
 const unsigned long ENROLLMENT_POLL_MS = 6000;
 String lastEnrollError = "";
+unsigned long lastTemplateSyncMs = 0;
+const unsigned long TEMPLATE_SYNC_MS = 60000;
+
+struct DeviceProfile
+{
+    String name;
+    String location;
+    String classLabel;
+    String status;
+};
+
+DeviceProfile deviceProfile{"", "", "", "OFFLINE"};
 
 // -------------------- Function Prototypes --------------------
-bool btnPressed(int pin);
 void oledHeader(const char *title);
 void oledFooter(const char *msg);
 void showFingerprintStatus(const char *status, int id = -1, int confidence = -1, const char *title = "Fingerprint");
-void showAirQuality(int raw);
 int readMQ135Raw();
 float mq135Percent(int raw);
 float mq135PseudoPPM(int raw);
@@ -93,7 +81,6 @@ void IRAM_ATTR isrNext();
 void IRAM_ATTR isrPrev();
 void IRAM_ATTR isrAction();
 void setupWiFi();
-bool fetchToken(const String &email, const String &password);
 void postAttendance(uint16_t fingerprintId, int confidence);
 void postAirQuality(int raw);
 void postDeviceStatus();
@@ -107,18 +94,15 @@ void clearEnrollmentJob();
 String extractJsonValue(const String &json, const String &key);
 String extractNestedJsonValue(const String &json, const String &sectionKey, const String &fieldKey);
 String formatClassLabel(const String &room, const String &grade, const String &section);
-void drawHomeScreen();
-void drawWifiScreen();
-void drawDeviceScreen();
-void drawFingerScreenIdle();
-void rotateUiIfNeeded();
+void showIdleScreen();
+void updateDeviceProfileFromJson(const String &json);
+void showAttendanceConfirmation(const String &name, const String &studentCode, uint16_t fingerprintId, int confidence);
+void syncTemplatesWithServer();
+bool parseTemplateAllowList(const String &json, bool allowed[], size_t maxSlots);
 
 // -------------------- Helper Functions --------------------
 // Interrupt flags
 volatile bool enrollIRQ = false;
-volatile bool nextIRQ = false;
-volatile bool prevIRQ = false;
-volatile bool actionIRQ = false;
 volatile bool cancelEnrollIRQ = false;
 
 void IRAM_ATTR isrEnroll()
@@ -129,9 +113,6 @@ void IRAM_ATTR isrEnroll()
     else
         enrollIRQ = true;
 }
-void IRAM_ATTR isrNext() { nextIRQ = true; }
-void IRAM_ATTR isrPrev() { prevIRQ = true; }
-void IRAM_ATTR isrAction() { actionIRQ = true; }
 
 void oledHeader(const char *title)
 {
@@ -151,6 +132,7 @@ void oledFooter(const char *msg)
 
 void showFingerprintStatus(const char *status, int id, int confidence, const char *title)
 {
+    idleScreenDrawn = false;
     oledHeader(title);
     display.setCursor(0, 16);
     display.print("Status: ");
@@ -168,26 +150,6 @@ void showFingerprintStatus(const char *status, int id, int confidence, const cha
         display.println(confidence);
     }
     oledFooter("Place finger...");
-    display.display();
-}
-
-void showAirQuality(int raw)
-{
-    float pct = mq135Percent(raw);
-    float ppm = mq135PseudoPPM(raw);
-    oledHeader("Air Quality");
-    display.setCursor(0, 16);
-    display.print("ADC: ");
-    display.println(raw);
-    display.setCursor(0, 28);
-    display.print("Level: ");
-    display.print(pct, 1);
-    display.println(" %");
-    display.setCursor(0, 40);
-    display.print("CO2~: ");
-    display.print(ppm, 0);
-    display.println(" ppm");
-    oledFooter("MQ135 reading...");
     display.display();
 }
 
@@ -257,10 +219,7 @@ bool enrollFingerprint(uint16_t id, const char *titleOverride)
         showFingerprintStatus("DUPLICATE", finger.fingerID, finger.confidence, uiTitle);
         delay(1200);
         enrollInProgress = false;
-        homeToast = "Already registered";
-        homeToastMs = millis();
-        currentScreen = UI_HOME;
-        drawHomeScreen();
+        showIdleScreen();
         return false;
     }
     display.setCursor(0, 48);
@@ -320,34 +279,11 @@ void setupWiFi()
     WiFiManager wm;
     wm.setTimeout(180);
 
-    // Load previously saved deviceId
-    prefs.begin("classtrack", false);
-    String savedId = prefs.getString("deviceId", "");
-    if (savedId.length() > 0)
-    {
-        deviceId = savedId;
-    }
-
-    // Create custom parameter for deviceId (visible in captive portal)
-    WiFiManagerParameter pDevId("deviceId", "Device ID", deviceId.c_str(), 32);
-    wm.addParameter(&pDevId);
-
-    // Optional: parameter to provision a device token
-    char tokenBuf[180];
-    String savedToken = prefs.getString("deviceToken", "");
-    savedToken.toCharArray(tokenBuf, sizeof(tokenBuf));
-    WiFiManagerParameter pDevToken("deviceToken", "Device Token (JWT)", tokenBuf, sizeof(tokenBuf) - 1);
-    wm.addParameter(&pDevToken);
-
     // Optional: parameter for server base URL
     // char serverBuf[64];
     // strlcpy(serverBuf, serverBase, sizeof(serverBuf));
     // WiFiManagerParameter pServer("serverBase", "Server Base (e.g. http://ip:5000)", serverBuf, 63);
     // wm.addParameter(&pServer);
-
-    // Parameter to set default room name for airquality/device
-    WiFiManagerParameter pRoom("room", "Room Name", roomName.c_str(), 32);
-    wm.addParameter(&pRoom);
 
     if (!wm.autoConnect("ClassTrack-Setup"))
     {
@@ -355,64 +291,10 @@ void setupWiFi()
         ESP.restart();
     }
 
-    // Read parameters after connect
-    deviceId = String(pDevId.getValue());
-    prefs.putString("deviceId", deviceId);
-
-    // Save device token if provided
-    deviceToken = String(pDevToken.getValue());
-    if (deviceToken.length() > 0)
-    {
-        prefs.putString("deviceToken", deviceToken);
-    }
-
-    // If server parameter enabled, you can parse and store it similarly
-    // serverBase = String(pServer.getValue()); // beware const char*; consider storing in Preferences
-
-    // Persist room name
-    roomName = String(pRoom.getValue());
-    if (roomName.length() == 0)
-        roomName = "Room-1";
-    prefs.putString("room", roomName);
-
     Serial.print("Connected. IP: ");
     Serial.println(WiFi.localIP());
     Serial.print("Device ID: ");
     Serial.println(deviceId);
-    Serial.print("DeviceToken: ");
-    Serial.println(deviceToken.isEmpty() ? "(none)" : "(set)");
-    Serial.print("Room: ");
-    Serial.println(roomName);
-}
-
-bool fetchToken(const String &email, const String &password)
-{
-    if (WiFi.status() != WL_CONNECTED)
-        return false;
-    HTTPClient http;
-    String url = String(serverBase) + "/api/auth/login";
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    String body = String("{\"email\":\"") + email + "\",\"password\":\"" + password + "\"}";
-    int code = http.POST(body);
-    if (code == 200)
-    {
-        String res = http.getString();
-        int tIdx = res.indexOf("\"token\":\"");
-        if (tIdx >= 0)
-        {
-            int start = tIdx + 10;
-            int end = res.indexOf("\"", start);
-            jwtToken = res.substring(start, end);
-            Serial.println("JWT acquired");
-            prefs.putString("jwt", jwtToken);
-            http.end();
-            return true;
-        }
-    }
-    Serial.printf("Login failed code=%d\n", code);
-    http.end();
-    return false;
 }
 
 void postAttendance(uint16_t fingerprintId, int confidence)
@@ -426,11 +308,32 @@ void postAttendance(uint16_t fingerprintId, int confidence)
     String url = String(serverBase) + "/api/attendance/device";
     http.begin(url);
     attachAuthHeaders(http);
-    // Map fingerprint ID to studentId (string). fingerprintMatch true, reliability from confidence
-    String payload = String("{\"studentId\":\"") + fingerprintId + "\",\"fingerprintMatch\":true,\"reliability\":" + confidence + "}";
+    // Send the fingerprint slot so backend can resolve student; include reliability score
+    String payload = String("{\"fingerprintId\":") + fingerprintId + ",\"fingerprintMatch\":true,\"reliability\":" + confidence + "}";
     int code = http.POST(payload);
+    String response = http.getString();
     Serial.printf("Attendance POST code=%d\n", code);
+    if (response.length())
+    {
+        Serial.println("Attendance response:");
+        Serial.println(response);
+    }
     http.end();
+
+    if (code >= 200 && code < 300)
+    {
+        String studentName = extractNestedJsonValue(response, "\"student\":{", "\"name\":\"");
+        String studentCode = extractNestedJsonValue(response, "\"student\":{", "\"studentId\":\"");
+        showAttendanceConfirmation(studentName, studentCode, fingerprintId, confidence);
+    }
+    else if (code == 404)
+    {
+        showFingerprintStatus("STUDENT MISSING", fingerprintId, confidence, "Attendance");
+    }
+    else
+    {
+        showFingerprintStatus("SERVER ERROR", fingerprintId, confidence, "Attendance");
+    }
 }
 
 void postAirQuality(int raw)
@@ -447,7 +350,7 @@ void postAirQuality(int raw)
     float co2 = ppm;           // pseudo ppm
     float temperature = 25.0f; // placeholder
     float humidity = 50.0f;    // placeholder
-    String payload = String("{\"room\":\"") + roomName + "\",\"pm25\":" + pm25 + ",\"co2\":" + co2 + ",\"temperature\":" + temperature + ",\"humidity\":" + humidity + "}";
+    String payload = String("{\"pm25\":") + pm25 + ",\"co2\":" + co2 + ",\"temperature\":" + temperature + ",\"humidity\":" + humidity + "}";
     int code = http.POST(payload);
     Serial.printf("AirQuality POST code=%d\n", code);
     http.end();
@@ -466,17 +369,25 @@ void postDeviceStatus()
     int battery = 95;
     String payload = String("{\"deviceId\":\"") + deviceId + "\",\"signal\":" + rssi + ",\"battery\":" + battery + ",\"status\":\"online\"}";
     int code = http.POST(payload);
+    String response = http.getString();
     Serial.printf("Device status POST code=%d\n", code);
+    if (response.length())
+    {
+        Serial.println("Device status response:");
+        Serial.println(response);
+    }
     http.end();
+    if (code >= 200 && code < 300 && response.length())
+    {
+        updateDeviceProfileFromJson(response);
+    }
 }
 
 void attachAuthHeaders(HTTPClient &http)
 {
     http.addHeader("Content-Type", "application/json");
-    if (!deviceToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + deviceToken);
-    else if (!jwtToken.isEmpty())
-        http.addHeader("Authorization", String("Bearer ") + jwtToken);
+    if (deviceId.length())
+        http.addHeader("X-Device-ID", deviceId);
 }
 
 String extractJsonValue(const String &json, const String &key)
@@ -530,6 +441,121 @@ String formatClassLabel(const String &room, const String &grade, const String &s
     return label;
 }
 
+void updateDeviceProfileFromJson(const String &json)
+{
+    String name = extractJsonValue(json, "\"name\":\"");
+    if (name.length())
+        deviceProfile.name = name;
+
+    String location = extractJsonValue(json, "\"location\":\"");
+    if (location.length())
+        deviceProfile.location = location;
+
+    String status = extractJsonValue(json, "\"status\":\"");
+    if (status.length())
+        deviceProfile.status = status;
+
+    String room = extractNestedJsonValue(json, "\"classroom\":{", "\"name\":\"");
+    String grade = extractNestedJsonValue(json, "\"classroom\":{", "\"grade\":\"");
+    String section = extractNestedJsonValue(json, "\"classroom\":{", "\"section\":\"");
+    String label = formatClassLabel(room, grade, section);
+    if (label.length())
+        deviceProfile.classLabel = label;
+
+    idleScreenDrawn = false;
+    if (!currentEnrollment.active)
+    {
+        showIdleScreen();
+    }
+}
+
+void showAttendanceConfirmation(const String &name, const String &studentCode, uint16_t fingerprintId, int confidence)
+{
+    idleScreenDrawn = false;
+    oledHeader("Attendance OK");
+    display.setCursor(0, 16);
+    if (name.length())
+        display.println(name);
+    else
+        display.println("Student recorded");
+    display.setCursor(0, 28);
+    display.print("ID: ");
+    if (studentCode.length())
+        display.println(studentCode);
+    else
+        display.println(fingerprintId);
+    display.setCursor(0, 40);
+    display.print("Slot ");
+    display.print(fingerprintId);
+    display.print(" Conf ");
+    display.println(confidence);
+    oledFooter("Synced with server");
+    display.display();
+}
+
+bool parseTemplateAllowList(const String &json, bool allowed[], size_t maxSlots)
+{
+    bool any = false;
+    for (size_t i = 0; i < maxSlots; ++i)
+        allowed[i] = false;
+
+    const int len = json.length();
+    int idx = 0;
+    while (idx < len)
+    {
+        while (idx < len && !isDigit(json[idx]))
+            idx++;
+        int start = idx;
+        while (idx < len && isDigit(json[idx]))
+            idx++;
+        if (start < idx)
+        {
+            int value = json.substring(start, idx).toInt();
+            if (value > 0 && value < static_cast<int>(maxSlots))
+            {
+                allowed[value] = true;
+                any = true;
+            }
+        }
+    }
+    return any;
+}
+
+void syncTemplatesWithServer()
+{
+    if (WiFi.status() != WL_CONNECTED)
+        return;
+    HTTPClient http;
+    String url = String(serverBase) + "/api/fingerprint/device/templates";
+    http.begin(url);
+    attachAuthHeaders(http);
+    int code = http.POST("{}");
+    Serial.printf("Template sync status=%d\n", code);
+    if (code != 200)
+    {
+        http.end();
+        return;
+    }
+    String body = http.getString();
+    http.end();
+    bool allowed[201];
+    if (!body.length() || !parseTemplateAllowList(body, allowed, 201))
+        return;
+
+    for (uint16_t slot = 1; slot < 200; ++slot)
+    {
+        if (allowed[slot])
+            continue;
+        if (finger.loadModel(slot) == FINGERPRINT_OK)
+        {
+            if (finger.deleteModel(slot) == FINGERPRINT_OK)
+            {
+                Serial.printf("Removed stale fingerprint slot %u\n", slot);
+            }
+        }
+    }
+}
+
 bool fetchNextEnrollmentJob(EnrollmentJob &job)
 {
     if (WiFi.status() != WL_CONNECTED)
@@ -566,6 +592,7 @@ bool fetchNextEnrollmentJob(EnrollmentJob &job)
 
 void showEnrollmentPrompt(const EnrollmentJob &job)
 {
+    idleScreenDrawn = false;
     oledHeader("Enroll Student");
     display.setCursor(0, 16);
     display.print(job.studentName);
@@ -580,8 +607,11 @@ void showEnrollmentPrompt(const EnrollmentJob &job)
         display.println("Ready for capture");
     }
     display.setCursor(0, 40);
-    display.println(job.classLabel.length() ? job.classLabel : "Unassigned");
-    oledFooter("Press ENROLL to start");
+    if (job.classLabel.length())
+        display.println(job.classLabel);
+    else
+        display.println("Assigned via web app");
+    oledFooter("Press ENROLL when ready");
     display.display();
 }
 
@@ -593,8 +623,7 @@ bool sendEnrollmentComplete(const EnrollmentJob &job, uint16_t slotId)
     String url = String(serverBase) + "/api/fingerprint/device/" + job.id + "/complete";
     http.begin(url);
     attachAuthHeaders(http);
-    String templatePayload = String("sensor-slot-") + slotId;
-    String payload = String("{\"template\":\"") + templatePayload + "\"}";
+    String payload = String("{\"fingerprintId\":") + slotId + "}";
     int code = http.POST(payload);
     Serial.printf("Enrollment complete code=%d\n", code);
     http.end();
@@ -626,16 +655,14 @@ void clearEnrollmentJob()
     currentEnrollment.studentName = "";
     currentEnrollment.studentCode = "";
     currentEnrollment.classLabel = "";
-    autoRotateEnabled = true;
     lastEnrollmentPollMs = 0;
+    showIdleScreen();
 }
 
 void pollEnrollmentQueue()
 {
     unsigned long now = millis();
     if (currentEnrollment.active)
-        return;
-    if (deviceToken.isEmpty() && jwtToken.isEmpty())
         return;
     if (now - lastEnrollmentPollMs < ENROLLMENT_POLL_MS)
         return;
@@ -645,142 +672,29 @@ void pollEnrollmentQueue()
     {
         currentEnrollment = job;
         currentEnrollment.active = true;
-        autoRotateEnabled = false;
-        currentScreen = UI_FINGER;
         showEnrollmentPrompt(currentEnrollment);
-        homeToast = "Enrollment ready";
-        homeToastMs = millis();
     }
 }
 
-void drawHomeScreen()
+void showIdleScreen()
 {
-    oledHeader("ClassTrack Device");
+    idleScreenDrawn = true;
+    oledHeader("Scanner Ready");
     display.setCursor(0, 16);
-    display.println("Ready.");
+    display.print("Name: ");
+    display.println(deviceProfile.name.length() ? deviceProfile.name : deviceId);
     display.setCursor(0, 28);
-    display.println("Enroll: BTN13  Next:12 Prev:14");
+    display.print("Location: ");
+    display.println(deviceProfile.location.length() ? deviceProfile.location : "--");
     display.setCursor(0, 40);
-    display.print("IP: ");
-    display.println(WiFi.isConnected() ? WiFi.localIP().toString() : "--");
-    if (!homeToast.isEmpty() && (millis() - homeToastMs) < HOME_TOAST_DURATION_MS)
-    {
-        oledFooter(homeToast.c_str());
-    }
+    if (deviceProfile.classLabel.length())
+        display.println(deviceProfile.classLabel);
     else
-    {
-        oledFooter("Auto-rotate screens");
-        homeToast = "";
-    }
+        display.println("No class linked");
+    oledFooter("Waiting for capture");
     display.display();
 }
 
-void drawWifiScreen()
-{
-    oledHeader("WiFi Status");
-    display.setCursor(0, 16);
-    display.print("SSID: ");
-    display.println(WiFi.SSID());
-    display.setCursor(0, 28);
-    display.print("IP: ");
-    display.println(WiFi.isConnected() ? WiFi.localIP().toString() : "--");
-    display.setCursor(0, 40);
-    display.print("JWT: ");
-    display.println(jwtToken.isEmpty() ? "no" : "ok");
-    display.setCursor(64, 40);
-    display.print("DevTok: ");
-    display.println(deviceToken.isEmpty() ? "no" : "ok");
-    oledFooter("Portal: ClassTrack-Setup");
-    display.display();
-}
-
-void drawDeviceScreen()
-{
-    oledHeader("Device Info");
-    display.setCursor(0, 16);
-    display.print("ID: ");
-    display.println(deviceId);
-    display.setCursor(0, 28);
-    display.print("EnrollID: ");
-    display.println(nextEnrollId);
-    display.setCursor(0, 40);
-    display.print("Server: ");
-    display.println(serverBase);
-    oledFooter("Press BTN13 to enroll");
-    display.display();
-}
-
-void drawFingerScreenIdle()
-{
-    if (currentEnrollment.active)
-        showEnrollmentPrompt(currentEnrollment);
-    else
-        showFingerprintStatus("SCAN");
-}
-
-void rotateUiIfNeeded()
-{
-    unsigned long now = millis();
-    if (!autoRotateEnabled)
-        return;
-    if (now - lastUiRotateMs < UI_ROTATE_MS)
-        return;
-    lastUiRotateMs = now;
-
-    switch (currentScreen)
-    {
-    case UI_HOME:
-        currentScreen = UI_WIFI;
-        break;
-    case UI_WIFI:
-        currentScreen = UI_AIR;
-        break;
-    case UI_AIR:
-        currentScreen = UI_FINGER;
-        break;
-    case UI_FINGER:
-        currentScreen = UI_DEVICE;
-        break;
-    case UI_DEVICE:
-        currentScreen = UI_HOME;
-        break;
-    }
-
-    if (currentScreen == UI_HOME)
-        drawHomeScreen();
-    else if (currentScreen == UI_WIFI)
-        drawWifiScreen();
-    else if (currentScreen == UI_AIR)
-        showAirQuality(readMQ135Raw());
-    else if (currentScreen == UI_FINGER)
-        drawFingerScreenIdle();
-    else if (currentScreen == UI_DEVICE)
-        drawDeviceScreen();
-}
-
-// Advance UI state machine by a step (+1 next, -1 prev) and render immediately
-void advanceUi(int step)
-{
-    autoRotateEnabled = false; // user-driven navigation
-    // compute next state
-    int total = 5; // number of screens
-    int next = (int)currentScreen + step;
-    while (next < 0)
-        next += total;
-    next = next % total;
-    currentScreen = (UiScreen)next;
-    // render corresponding screen
-    if (currentScreen == UI_HOME)
-        drawHomeScreen();
-    else if (currentScreen == UI_WIFI)
-        drawWifiScreen();
-    else if (currentScreen == UI_AIR)
-        showAirQuality(readMQ135Raw());
-    else if (currentScreen == UI_FINGER)
-        drawFingerScreenIdle();
-    else if (currentScreen == UI_DEVICE)
-        drawDeviceScreen();
-}
 
 // -------------------- Setup --------------------
 void setup()
@@ -810,22 +724,10 @@ void setup()
 
     setupWiFi();
 
-    prefs.begin("classtrack", false);
-    jwtToken = prefs.getString("jwt", "");
-    deviceToken = prefs.getString("deviceToken", "");
-    if (jwtToken.isEmpty())
-        fetchToken("admin@example.com", "CHANGE_ME");
-
     pinMode(ENROLL_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(UI_NEXT_PIN, INPUT_PULLUP);
-    pinMode(UI_PREV_PIN, INPUT_PULLUP);
-    pinMode(ACTION_BUTTON_PIN, INPUT_PULLUP);
 
     // Attach interrupts on falling edge (button to GND)
     attachInterrupt(digitalPinToInterrupt(ENROLL_BUTTON_PIN), isrEnroll, FALLING);
-    attachInterrupt(digitalPinToInterrupt(UI_NEXT_PIN), isrNext, FALLING);
-    attachInterrupt(digitalPinToInterrupt(UI_PREV_PIN), isrPrev, FALLING);
-    attachInterrupt(digitalPinToInterrupt(ACTION_BUTTON_PIN), isrAction, FALLING);
 
     for (uint16_t testId = 1; testId < 200; ++testId)
     {
@@ -836,7 +738,8 @@ void setup()
         }
     }
 
-    drawHomeScreen();
+    postDeviceStatus();
+    showIdleScreen();
 }
 
 // -------------------- Loop --------------------
@@ -865,8 +768,6 @@ void loop()
                 {
                     reportEnrollmentFailure(currentEnrollment, "Upload failed");
                 }
-                homeToast = synced ? "Enrollment synced" : "Enroll upload failed";
-                homeToastMs = millis();
                 clearEnrollmentJob();
             }
             nextEnrollId++;
@@ -875,8 +776,6 @@ void loop()
         {
             String reason = lastEnrollError.length() ? lastEnrollError : "Enrollment failed";
             reportEnrollmentFailure(currentEnrollment, reason);
-            homeToast = "Enroll failed";
-            homeToastMs = millis();
             clearEnrollmentJob();
         }
         enrollRequested = false;
@@ -885,55 +784,14 @@ void loop()
     // Handle cancel request during enrollment
     if (cancelEnrollIRQ && enrollInProgress)
     {
-        // Flag is consumed in enrollFingerprint checks; here just ensure UI feedback
-        // No action needed; keep debounce timestamp fresh
         lastBtnMs = now;
     }
 
-    // UI buttons
-    if (nextIRQ && (now - lastBtnMs) > BTN_DEBOUNCE_MS)
-    {
-        lastBtnMs = now;
-        nextIRQ = false;
-        autoRotateEnabled = false;
-        currentScreen = (UiScreen)((currentScreen + 1) % 5);
-        rotateUiIfNeeded();
-    }
-    if (nextIRQ && (now - lastBtnMs) > BTN_DEBOUNCE_MS)
-    {
-        lastBtnMs = now;
-        nextIRQ = false;
-        advanceUi(+1);
-    }
-    if (prevIRQ && (now - lastBtnMs) > BTN_DEBOUNCE_MS)
-    {
-        lastBtnMs = now;
-        prevIRQ = false;
-        advanceUi(-1);
-    }
-    if (actionIRQ && (now - lastBtnMs) > BTN_DEBOUNCE_MS)
-    {
-        lastBtnMs = now;
-        actionIRQ = false;
-        // Context refresh for current screen
-        if (currentScreen == UI_AIR)
-            showAirQuality(readMQ135Raw());
-        else if (currentScreen == UI_WIFI)
-            drawWifiScreen();
-        else if (currentScreen == UI_DEVICE)
-            drawDeviceScreen();
-        else if (currentScreen == UI_FINGER)
-            drawFingerScreenIdle();
-        else
-            drawHomeScreen();
-    }
     if (now - lastAQMs >= AQ_INTERVAL_MS)
     {
         lastAQMs = now;
         int raw = readMQ135Raw();
         Serial.printf("MQ135 raw=%d\n", raw);
-        if (currentScreen == UI_AIR)
-            showAirQuality(raw);
         postAirQuality(raw);
         // Send a heartbeat periodically so UI shows the device
         postDeviceStatus();
@@ -944,11 +802,16 @@ void loop()
     if (id >= 0)
     {
         Serial.printf("Fingerprint ID=%d conf=%d\n", id, fingerConfidence);
-        currentScreen = UI_FINGER;
         showFingerprintStatus("MATCH", id, fingerConfidence);
         postAttendance(id, fingerConfidence);
         delay(1500);
     }
     else
+    {
+        if (!currentEnrollment.active && !idleScreenDrawn)
+        {
+            showIdleScreen();
+        }
         delay(100);
+    }
 }

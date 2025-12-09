@@ -3,7 +3,7 @@ import { body } from 'express-validator'
 import { FingerprintEnrollmentStatus, UserRole } from '@prisma/client'
 import prisma from '../config/database'
 import {
-	authenticateDeviceToken,
+	authenticateDeviceSecret,
 	authenticateToken,
 	authorizeRoles,
 	type AuthRequest,
@@ -28,12 +28,12 @@ router.post(
 	[
 		body('studentId').notEmpty().withMessage('studentId is required'),
 		body('classroomId').optional().isString(),
-		body('deviceId').optional().isString(),
+		body('deviceId').notEmpty().withMessage('deviceId is required'),
 		validate,
 	],
 	async (req: AuthRequest, res: Response) => {
 		try {
-			const { studentId, classroomId, deviceId } = req.body as { studentId: string; classroomId?: string; deviceId?: string }
+			const { studentId, classroomId, deviceId } = req.body as { studentId: string; classroomId?: string; deviceId: string }
 
 			const student = await prisma.student.findUnique({
 				where: { id: studentId },
@@ -61,20 +61,18 @@ router.post(
 				}
 			}
 
-			let resolvedDeviceId: string | undefined
-			if (deviceId) {
-				let device = await prisma.device.findUnique({ where: { id: deviceId } })
-				if (!device) {
-					device = await prisma.device.findUnique({ where: { deviceId } })
-				}
-				if (!device || device.schoolId !== schoolId) {
-					return res.status(400).json({ error: 'Device not found for this school' })
-				}
-				if (device.classroomId && device.classroomId !== resolvedClassroomId) {
-					return res.status(400).json({ error: 'Device is mapped to another classroom' })
-				}
-				resolvedDeviceId = device.id
+			let resolvedDeviceId: string
+			let device = await prisma.device.findUnique({ where: { id: deviceId } })
+			if (!device) {
+				device = await prisma.device.findUnique({ where: { deviceId } })
 			}
+			if (!device || device.schoolId !== schoolId) {
+				return res.status(400).json({ error: 'Device not found for this school' })
+			}
+			if (device.classroomId && device.classroomId !== resolvedClassroomId) {
+				return res.status(400).json({ error: 'Device is mapped to another classroom' })
+			}
+			resolvedDeviceId = device.id
 
 			const existing = await prisma.fingerprintEnrollment.findFirst({
 				where: {
@@ -185,14 +183,10 @@ router.get('/enrollments/:id', authenticateToken, async (req: AuthRequest, res: 
 	}
 })
 
-router.post('/device/next', authenticateDeviceToken, async (req: AuthRequest, res: Response) => {
-	try {
-		const tokenDeviceId = req.device?.deviceId
-		if (!tokenDeviceId) {
-			return res.status(401).json({ error: 'Device token missing deviceId' })
-		}
 
-		const device = await prisma.device.findUnique({ where: { deviceId: tokenDeviceId } })
+router.post('/device/next', authenticateDeviceSecret, async (req: AuthRequest, res: Response) => {
+	try {
+		const device = req.deviceRecord
 		if (!device) {
 			return res.status(404).json({ error: 'Device not registered' })
 		}
@@ -200,9 +194,7 @@ router.post('/device/next', authenticateDeviceToken, async (req: AuthRequest, re
 		const where: any = {
 			schoolId: device.schoolId,
 			status: FingerprintEnrollmentStatus.PENDING,
-		}
-		if (device.classroomId) {
-			where.classroomId = device.classroomId
+			deviceId: device.id,
 		}
 
 		const enrollment = await prisma.fingerprintEnrollment.findFirst({
@@ -233,16 +225,11 @@ router.post('/device/next', authenticateDeviceToken, async (req: AuthRequest, re
 
 router.post(
 	'/device/:id/complete',
-	authenticateDeviceToken,
-	[body('template').notEmpty().withMessage('Fingerprint template is required'), validate],
+	authenticateDeviceSecret,
+	[body('fingerprintId').isInt({ min: 1 }).withMessage('Fingerprint ID is required'), validate],
 	async (req: AuthRequest, res: Response) => {
 		try {
-			const tokenDeviceId = req.device?.deviceId
-			if (!tokenDeviceId) {
-				return res.status(401).json({ error: 'Device token missing deviceId' })
-			}
-
-			const device = await prisma.device.findUnique({ where: { deviceId: tokenDeviceId } })
+			const device = req.deviceRecord
 			if (!device) {
 				return res.status(404).json({ error: 'Device not registered' })
 			}
@@ -263,14 +250,14 @@ router.post(
 				return res.status(403).json({ error: 'Enrollment is locked by another device' })
 			}
 
-			const template = req.body.template as string
+			const fingerprintId = Number(req.body.fingerprintId)
 
 			const [updatedEnrollment] = await prisma.$transaction([
 				prisma.fingerprintEnrollment.update({
 					where: { id: enrollment.id },
 					data: {
 						status: FingerprintEnrollmentStatus.COMPLETED,
-						template,
+						template: String(fingerprintId),
 						deviceId: device.id,
 						completedAt: new Date(),
 					},
@@ -278,7 +265,7 @@ router.post(
 				}),
 				prisma.student.update({
 					where: { id: enrollment.studentId },
-					data: { fingerprintData: template },
+					data: { fingerprintData: String(fingerprintId) },
 				}),
 			])
 
@@ -292,16 +279,11 @@ router.post(
 
 router.post(
 	'/device/:id/fail',
-	authenticateDeviceToken,
+	authenticateDeviceSecret,
 	[body('reason').optional().isString(), validate],
 	async (req: AuthRequest, res: Response) => {
 		try {
-			const tokenDeviceId = req.device?.deviceId
-			if (!tokenDeviceId) {
-				return res.status(401).json({ error: 'Device token missing deviceId' })
-			}
-
-			const device = await prisma.device.findUnique({ where: { deviceId: tokenDeviceId } })
+			const device = req.deviceRecord
 			if (!device) {
 				return res.status(404).json({ error: 'Device not registered' })
 			}

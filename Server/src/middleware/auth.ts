@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { Request, Response, NextFunction } from 'express';
-import { UserRole } from '@prisma/client';
+import { UserRole, Device } from '@prisma/client';
+import prisma from '../config/database';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -13,6 +14,7 @@ export interface AuthRequest extends Request {
     deviceId: string;
     schoolId?: string;
   };
+  deviceRecord?: Device;
 }
 
 export const authenticateToken = (
@@ -43,31 +45,30 @@ export const generateToken = (payload: { id: string; email: string; role: UserRo
 };
 
 // Device token utilities
-export const generateDeviceToken = (payload: { deviceId: string; schoolId?: string }): string => {
-  return jwt.sign(payload, process.env.JWT_SECRET!, {
-    expiresIn: process.env.DEVICE_JWT_EXPIRES_IN || '90d',
-  } as jwt.SignOptions);
-};
-
-export const authenticateDeviceToken = (
+export const authenticateDeviceSecret = async (
   req: AuthRequest,
   res: Response,
   next: NextFunction
 ) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
+  const headerValue = req.headers['x-device-id'] || req.headers['x-device-secret'];
+  const deviceId = (typeof headerValue === 'string' && headerValue.trim())
+    || (typeof req.body?.deviceId === 'string' && req.body.deviceId.trim())
+    || (typeof req.query?.deviceId === 'string' && (req.query.deviceId as string).trim());
+
+  if (!deviceId) {
+    return res.status(401).json({ error: 'Device identifier required' });
   }
+
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
-    if (decoded && decoded.deviceId) {
-      req.device = { deviceId: decoded.deviceId, schoolId: decoded.schoolId };
-      return next();
+    const device = await prisma.device.findUnique({ where: { deviceId } });
+    if (!device) {
+      return res.status(404).json({ error: 'Device not registered' });
     }
-    return res.status(403).json({ error: 'Invalid device token' });
+    req.device = { deviceId: device.deviceId, schoolId: device.schoolId };
+    req.deviceRecord = device;
+    next();
   } catch (error) {
-    return res.status(403).json({ error: 'Invalid or expired token' });
+    return res.status(500).json({ error: 'Failed to authenticate device' });
   }
 };
 

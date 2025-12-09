@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Copy, Loader2 } from "lucide-react"
+import { Loader2 } from "lucide-react"
 
 const DEVICE_TYPES = [
   { value: "FINGERPRINT_SCANNER", label: "Fingerprint Scanner", helper: "Used for student attendance enrollment." },
@@ -42,8 +42,7 @@ export default function AddDevicePage() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([])
   const [loadingClassrooms, setLoadingClassrooms] = useState(true)
   const [classroomsError, setClassroomsError] = useState("")
-  const [registration, setRegistration] = useState<{ device: any; deviceToken: string } | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [connectedDevice, setConnectedDevice] = useState<any | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -70,8 +69,7 @@ export default function AddDevicePage() {
   const reset = () => {
     setForm({ ...INITIAL_FORM })
     setStep("form")
-    setRegistration(null)
-    setCopied(false)
+    setConnectedDevice(null)
     setError("")
   }
 
@@ -99,24 +97,13 @@ export default function AddDevicePage() {
         firmwareVersion: form.firmwareVersion.trim() || undefined,
         classroomId: form.classroomId || undefined,
       }
-      const response = await DevicesAPI.register(payload)
-      setRegistration(response)
+      const device = await DevicesAPI.connect(payload)
+      setConnectedDevice(device)
       setStep("instructions")
     } catch (err: any) {
       setError(err?.message || "Failed to register device")
     } finally {
       setLoading(false)
-    }
-  }
-
-  const copyToken = async () => {
-    if (!registration?.deviceToken) return
-    try {
-      await navigator.clipboard.writeText(registration.deviceToken)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      setCopied(false)
     }
   }
 
@@ -129,7 +116,7 @@ export default function AddDevicePage() {
             <p className="text-sm uppercase text-muted-foreground tracking-wide">Devices</p>
             <h1 className="text-3xl font-semibold text-foreground mt-2">Register a device</h1>
             <p className="text-muted-foreground mt-1 max-w-2xl">
-              School admins can pair new IoT hardware by creating a device record and generating a one-time token for the installer.
+              School admins can pair new IoT hardware by creating a device record that trusts the factory-programmed secret ID.
             </p>
           </div>
 
@@ -246,35 +233,24 @@ export default function AddDevicePage() {
             </Card>
           )}
 
-          {step === "instructions" && registration && (
+          {step === "instructions" && connectedDevice && (
             <div className="grid gap-6 lg:grid-cols-2">
               <Card>
                 <CardHeader>
-                  <CardTitle>Device token generated</CardTitle>
-                  <CardDescription>Share this token with the installer. It expires once the device checks in.</CardDescription>
+                  <CardTitle>Device linked to your school</CardTitle>
+                  <CardDescription>This hardware ID is now trusted. Power on the device with the same secret ID to bring it online.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-6">
-                  <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">One-time token</p>
-                    <div className="flex flex-col gap-2 rounded-md border border-dashed border-muted-foreground/30 bg-muted/50 p-3">
-                      <code className="text-sm font-mono break-all text-foreground">{registration.deviceToken}</code>
-                      <Button type="button" size="sm" variant="secondary" className="self-end" onClick={copyToken}>
-                        <Copy className="h-3.5 w-3.5 mr-2" />
-                        {copied ? "Copied" : "Copy token"}
-                      </Button>
-                    </div>
-                  </div>
-
                   <div className="grid gap-4 text-sm">
-                    <Detail label="Device" value={registration.device.name} />
-                    <Detail label="Device ID" value={registration.device.deviceId} />
-                    <Detail label="Type" value={registration.device.type.replace(/_/g, " ")} />
-                    <Detail label="Classroom" value={formatClassroomLabel(registration.device.classroom)} />
+                    <Detail label="Device" value={connectedDevice.name} />
+                    <Detail label="Secret device ID" value={connectedDevice.deviceId} />
+                    <Detail label="Type" value={connectedDevice.type.replace(/_/g, " ")} />
+                    <Detail label="Classroom" value={formatClassroomLabel(connectedDevice.classroom)} />
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary">Status: {registration.device.status}</Badge>
-                    {registration.device.firmwareVersion && <Badge variant="outline">FW {registration.device.firmwareVersion}</Badge>}
+                    <Badge variant="secondary">Status: {connectedDevice.status}</Badge>
+                    {connectedDevice.firmwareVersion && <Badge variant="outline">FW {connectedDevice.firmwareVersion}</Badge>}
                   </div>
 
                   <div className="flex flex-wrap gap-3">
@@ -287,18 +263,16 @@ export default function AddDevicePage() {
               <Card>
                 <CardHeader>
                   <CardTitle>Next steps</CardTitle>
-                  <CardDescription>Use these steps to finish pairing the hardware.</CardDescription>
+                  <CardDescription>Finish connecting the physical device.</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <ol className="space-y-4 text-sm list-decimal list-inside text-muted-foreground">
                     <li>
-                      Flash the device with the provided Device ID <span className="font-semibold text-foreground">{registration.device.deviceId}</span>.
+                      Ensure the firmware keeps the hardcoded device ID <span className="font-semibold text-foreground">{connectedDevice.deviceId}</span>.
                     </li>
-                    <li>
-                      Apply the token above to the device configuration (`DEVICE_TOKEN`).
-                    </li>
-                    <li>Power on the device and connect it to Wi-Fi. It will call the heartbeat endpoint and claim the token.</li>
-                    <li>Return to the devices list to confirm the status turns online.</li>
+                    <li>Connect the unit to Wi-Fi using the installer portal or serial console.</li>
+                    <li>The device will announce itself using that ID and automatically attach to this school.</li>
+                    <li>Return to the devices list to confirm the status switches to online.</li>
                   </ol>
                 </CardContent>
               </Card>

@@ -3,7 +3,7 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { Sidebar } from "@/components/sidebar"
-import { ClassroomsAPI, FingerprintAPI, StudentsAPI } from "@/lib/api"
+import { ClassroomsAPI, DevicesAPI, FingerprintAPI, StudentsAPI } from "@/lib/api"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -37,6 +37,13 @@ type FingerprintEnrollment = {
   device?: { deviceId: string; name: string | null }
 }
 
+type DeviceOption = {
+	id: string
+	name: string
+	deviceId: string
+	classroomId?: string | null
+}
+
 const initialFormState = {
   studentId: "",
   name: "",
@@ -62,6 +69,10 @@ export default function AddStudentPage() {
   const [classrooms, setClassrooms] = useState<ClassroomOption[]>([])
   const [classroomsLoading, setClassroomsLoading] = useState(true)
   const [classroomsError, setClassroomsError] = useState("")
+  const [devices, setDevices] = useState<DeviceOption[]>([])
+  const [devicesLoading, setDevicesLoading] = useState(true)
+  const [devicesError, setDevicesError] = useState("")
+  const [selectedDeviceId, setSelectedDeviceId] = useState("")
   const [createdStudent, setCreatedStudent] = useState<StudentRecord | null>(null)
   const [enrollment, setEnrollment] = useState<FingerprintEnrollment | null>(null)
   const [enrollmentLoading, setEnrollmentLoading] = useState(false)
@@ -70,7 +81,7 @@ export default function AddStudentPage() {
   const enrollmentStatusMessage = !enrollment
     ? ""
     : enrollment.status === "COMPLETED"
-      ? "Template stored. Attendance devices will now match this student."
+      ? "Fingerprint ID stored. Attendance devices will now match this student."
       : enrollment.status === "FAILED"
         ? "Scanner reported a failure. Try capturing again."
         : "Waiting for IoT scanner to finish capturing."
@@ -103,6 +114,43 @@ export default function AddStudentPage() {
     }
   }, [])
 
+  useEffect(() => {
+  let active = true
+  ;(async () => {
+    try {
+      setDevicesLoading(true)
+      setDevicesError("")
+      const list = await DevicesAPI.list()
+      if (!active) return
+      const fingerprintDevices = (list as any[]).filter((device) => device.type === "FINGERPRINT_SCANNER")
+      setDevices(
+        fingerprintDevices.map((device) => ({
+          id: device.id,
+          deviceId: device.deviceId,
+          name: device.name || device.deviceId,
+          classroomId: device.classroomId,
+        }))
+      )
+    } catch (err: any) {
+      if (!active) return
+      setDevicesError(err?.message || "Failed to load devices")
+    } finally {
+      if (active) setDevicesLoading(false)
+    }
+  })()
+  return () => {
+    active = false
+  }
+  }, [])
+
+  useEffect(() => {
+  if (!createdStudent || !devices.length) {
+    return
+  }
+  const match = devices.find((device) => device.classroomId === createdStudent.classroomId)
+  setSelectedDeviceId(match?.id || devices[0]?.id || "")
+  }, [createdStudent, devices])
+
   const onChange = (e: ChangeEvent<HTMLInputElement>) =>
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }))
 
@@ -112,6 +160,7 @@ export default function AddStudentPage() {
     setEnrollment(null)
     setEnrollmentError("")
     setError("")
+    setSelectedDeviceId("")
   }
 
   const submit = async (e: FormEvent<HTMLFormElement>) => {
@@ -155,11 +204,16 @@ export default function AddStudentPage() {
   const startFingerprintEnrollment = async () => {
     if (!createdStudent) return
     setEnrollmentError("")
-      setEnrollmentLoading(true)
+	if (!selectedDeviceId) {
+		setEnrollmentError("Select the IoT scanner that will capture this fingerprint.")
+		return
+	}
+	setEnrollmentLoading(true)
     try {
       const enrollmentRecord = await FingerprintAPI.requestEnrollment({
         studentId: createdStudent.id,
         classroomId: createdStudent.classroomId || form.classroomId || undefined,
+        deviceId: selectedDeviceId,
       })
       setEnrollment(enrollmentRecord as FingerprintEnrollment)
     } catch (err: any) {
@@ -298,10 +352,40 @@ export default function AddStudentPage() {
                 <div className="space-y-2">
                   <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">How it works</p>
                   <ul className="list-disc text-sm pl-4 space-y-1 text-muted-foreground">
-                    <li>Click “Start fingerprint capture” to queue the enrollment.</li>
-                    <li>The IoT scanner polls <code className="rounded bg-muted px-1 py-0.5 text-xs">POST /api/fingerprint/device/next</code> to pull pending students.</li>
-                    <li>Once the scan completes, the device posts the template back and this status updates.</li>
+                    <li>Choose which scanner will enroll this student right now.</li>
+                    <li>Click “Start fingerprint capture” to queue the enrollment for that device.</li>
+                    <li>The IoT scanner polls <code className="rounded bg-muted px-1 py-0.5 text-xs">POST /api/fingerprint/device/next</code> and only sees jobs assigned to it.</li>
+                    <li>Once the scan completes, the device pushes the fingerprint ID back and this status updates.</li>
                   </ul>
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Capture device</label>
+                  {devicesLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Loading scanners
+                    </div>
+                  ) : devicesError ? (
+                    <p className="text-xs text-destructive">{devicesError}</p>
+                  ) : devices.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No fingerprint scanners are registered yet. Create one under Devices.</p>
+                  ) : (
+                    <Select value={selectedDeviceId} onValueChange={(value) => setSelectedDeviceId(value)}>
+                      <SelectTrigger className="w-full text-left">
+                        <SelectValue placeholder="Select scanner" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {devices.map((device) => (
+                          <SelectItem key={device.id} value={device.id}>
+                            <div className="flex flex-col">
+                              <span className="font-medium">{device.name}</span>
+                              <span className="text-[11px] text-muted-foreground">ID {device.deviceId}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <p className="text-[11px] text-muted-foreground mt-1">Only the selected device will see this enrollment request.</p>
                 </div>
                 {enrollmentError && (
                   <Alert variant="destructive">
@@ -311,7 +395,11 @@ export default function AddStudentPage() {
                   </Alert>
                 )}
                 <div className="flex flex-wrap gap-2">
-                  <Button type="button" onClick={startFingerprintEnrollment} disabled={enrollmentLoading}>
+                  <Button
+                    type="button"
+                    onClick={startFingerprintEnrollment}
+                    disabled={enrollmentLoading || devicesLoading || !selectedDeviceId || devices.length === 0}
+                  >
                     {enrollmentLoading ? (
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                     ) : (

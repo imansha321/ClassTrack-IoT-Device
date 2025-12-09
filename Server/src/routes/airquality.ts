@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { body } from 'express-validator';
 import prisma from '../config/database';
-import { authenticateToken, authenticateDeviceToken, AuthRequest, authorizeRoles } from '../middleware/auth';
+import { authenticateToken, authenticateDeviceSecret, AuthRequest, authorizeRoles } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { AlertType, AlertSeverity, UserRole } from '@prisma/client';
 import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
@@ -242,8 +242,8 @@ router.post(
 router.post(
   '/device',
   [
-    authenticateDeviceToken,
-    body('room').notEmpty().withMessage('Room is required'),
+    authenticateDeviceSecret,
+    body('room').optional().isString().withMessage('Room must be a string'),
     body('pm25').isFloat({ min: 0 }).withMessage('PM2.5 must be a positive number'),
     body('co2').isInt({ min: 0 }).withMessage('CO2 must be a positive integer'),
     body('temperature').isFloat().withMessage('Temperature must be a number'),
@@ -253,23 +253,31 @@ router.post(
   async (req: AuthRequest, res: Response) => {
     try {
       const { room, pm25, co2, temperature, humidity } = req.body;
-      const tokenDeviceId = req.device?.deviceId;
+      const deviceRecord = req.deviceRecord;
 
-      if (!tokenDeviceId) {
-        return res.status(401).json({ error: 'Device token missing deviceId' });
+      if (!deviceRecord) {
+        return res.status(404).json({ error: 'Device not registered' });
       }
 
-      const device = await prisma.device.findUnique({ where: { deviceId: tokenDeviceId } });
+      const device = await prisma.device.findUnique({
+        where: { id: deviceRecord.id },
+        include: { classroom: true },
+      });
+
       if (!device) {
-        return res.status(404).json({ error: 'Device not found' });
+        return res.status(404).json({ error: 'Device not registered' });
       }
+
+      const derivedRoom = typeof room === 'string' && room.trim().length
+        ? room.trim()
+        : device.classroom?.name || device.location || 'Unassigned';
 
       const reading = await prisma.airQuality.create({
         data: {
           deviceId: device.id,
           schoolId: device.schoolId,
           classroomId: device.classroomId,
-          room,
+          room: derivedRoom,
           pm25,
           co2,
           temperature,

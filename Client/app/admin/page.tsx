@@ -25,7 +25,7 @@ export default function AdminPage() {
   const [users, setUsers] = useState<UserRow[]>([])
   const [error, setError] = useState("")
   const [devices, setDevices] = useState<any[]>([])
-  const [tokenByDevice, setTokenByDevice] = useState<Record<string, string>>({})
+  const [copiedDeviceId, setCopiedDeviceId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!hasHydrated) {
@@ -87,12 +87,13 @@ export default function AdminPage() {
     }
   }
 
-  const onProvisionToken = async (deviceId: string) => {
+  const copyDeviceId = async (deviceId: string) => {
     try {
-      const res = await DevicesAPI.provision({ deviceId })
-      setTokenByDevice((prev) => ({ ...prev, [deviceId]: res.deviceToken }))
+      await navigator.clipboard.writeText(deviceId)
+      setCopiedDeviceId(deviceId)
+      setTimeout(() => setCopiedDeviceId(null), 2000)
     } catch (e: any) {
-      setError(e?.message || "Failed to provision device token")
+      setError(e?.message || "Unable to copy device ID")
     }
   }
 
@@ -164,7 +165,8 @@ export default function AdminPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Device Tokens</CardTitle>
+            <CardTitle>Device Secrets</CardTitle>
+            <p className="text-sm text-muted-foreground">Share these factory IDs with installers instead of issuing tokens.</p>
           </CardHeader>
           <CardContent>
             {error && (
@@ -174,11 +176,10 @@ export default function AdminPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border">
-                    <th className="text-left p-3">Device ID</th>
+                    <th className="text-left p-3">Secret ID</th>
                     <th className="text-left p-3">Name</th>
                     <th className="text-left p-3">Location</th>
                     <th className="text-left p-3">Status</th>
-                    <th className="text-left p-3">Token</th>
                     <th className="text-right p-3">Actions</th>
                   </tr>
                 </thead>
@@ -189,14 +190,9 @@ export default function AdminPage() {
                       <td className="p-3 text-muted-foreground">{d.name || '-'}</td>
                       <td className="p-3 text-muted-foreground">{d.location || '-'}</td>
                       <td className="p-3 text-muted-foreground">{d.status || 'unknown'}</td>
-                      <td className="p-3">
-                        <div className="text-xs break-all">
-                          {tokenByDevice[d.deviceId] ? tokenByDevice[d.deviceId] : <span className="text-muted-foreground">Not provisioned</span>}
-                        </div>
-                      </td>
                       <td className="p-3 text-right">
-                        <Button variant="outline" className="bg-transparent" onClick={() => onProvisionToken(d.deviceId)}>
-                          Provision Token
+                        <Button variant="outline" className="bg-transparent" onClick={() => copyDeviceId(d.deviceId)}>
+                          {copiedDeviceId === d.deviceId ? 'Copied!' : 'Copy ID'}
                         </Button>
                       </td>
                     </tr>

@@ -165,14 +165,8 @@ export const DevicesAPI = {
   delete(id: string) {
     return apiFetch(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
-  register(data: { deviceId: string; name: string; type: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; location: string; firmwareVersion?: string; classroomId?: string | null }) {
-    return apiFetch<{ device: any; deviceToken: string }>(`/api/devices/register`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
-  provision(data: { deviceId: string; name?: string; type?: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; classroomId?: string | null }) {
-    return apiFetch<{ deviceToken: string }>(`/api/devices/provision`, {
+  connect(data: { deviceId: string; name: string; type: 'FINGERPRINT_SCANNER' | 'MULTI_SENSOR' | 'AIR_QUALITY_SENSOR'; location: string; firmwareVersion?: string; classroomId?: string | null }) {
+    return apiFetch(`/api/devices/connect`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -323,7 +317,7 @@ export const ReportsAPI = {
 };
 
 export const FingerprintAPI = {
-  requestEnrollment(data: { studentId: string; classroomId?: string; deviceId?: string }) {
+  requestEnrollment(data: { studentId: string; classroomId?: string; deviceId: string }) {
     return apiFetch(`/api/fingerprint/enrollments`, {
       method: "POST",
       body: JSON.stringify(data),
