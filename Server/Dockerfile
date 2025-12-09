@@ -1,9 +1,5 @@
 # Stage 1 - Build TS
-FROM node:20-alpine AS builder
-
-
-# Install dependencies for Prisma
-RUN apk add --no-cache openssl1.1 libstdc++ bash curl
+FROM node:20-bullseye as builder
 
 WORKDIR /app
 
