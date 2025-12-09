@@ -43,7 +43,7 @@ jobs:
           username: ${{ secrets.VPS_USERNAME }}
           password: ${{ secrets.VPS_PASSWORD }}
           script: |
-            cd ~/multiapp
+            cd ~/iot
             docker load < server.tar
             docker load < client.tar
             docker-compose down
