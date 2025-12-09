@@ -46,5 +46,6 @@ jobs:
             cd ~/iot
             docker load < server.tar
             docker load < client.tar
-            docker-compose down
-            docker-compose up -d --force-recreate
+
+            docker compose down || true
+            docker compose up -d --force-recreate

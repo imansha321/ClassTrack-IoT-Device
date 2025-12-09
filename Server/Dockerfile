@@ -1,20 +1,26 @@
 # Stage 1 - Build TS
-FROM node:20-slim as builder
+FROM node:20-alpine as builder
 
 WORKDIR /app
+
+# Prisma must know binaries target
+ENV PRISMA_CLI_BINARY_TARGETS="linux-musl"
 
 COPY package*.json ./
 RUN npm install
 
 COPY . .
-RUN npm run build   # must compile TypeScript
+RUN npx prisma generate
+RUN npm run build
 
 # Stage 2 - Run JS
-FROM node:18-alpine
+FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Only copy built JS + node_modules
+# Needed for prisma engine runtime
+RUN apk add --no-cache openssl
+
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
