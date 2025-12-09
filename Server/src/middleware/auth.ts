@@ -17,6 +17,13 @@ export interface AuthRequest extends Request {
   deviceRecord?: Device;
 }
 
+export const requireUser = (req: AuthRequest): NonNullable<AuthRequest['user']> => {
+  if (!req.user) {
+    throw new Error('Authenticated user context missing');
+  }
+  return req.user;
+};
+
 export const authenticateToken = (
   req: AuthRequest,
   res: Response,

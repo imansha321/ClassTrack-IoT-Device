@@ -3,7 +3,7 @@ import { body } from 'express-validator';
 import prisma from '../config/database';
 import { authenticateToken, authenticateDeviceSecret, AuthRequest, authorizeRoles } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { AlertType, AlertSeverity, UserRole } from '@prisma/client';
+import { AlertSeverity, AlertType, UserRole } from '@prisma/client';
 import { getEffectiveSchoolId, getTeacherClassroomIds } from '../utils/tenant';
 
 const router = Router();
