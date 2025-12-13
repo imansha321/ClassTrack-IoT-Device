@@ -27,12 +27,13 @@ jobs:
           docker save server_app:latest > server.tar
           docker save client_app:latest > client.tar
 
-      - name: Transfer images to backend
+      - name: Transfer images to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
-          password: ${{ secrets.VPS_PASSWORD }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
           source: "*.tar"
           target: "~/iot/"
 
@@ -41,7 +42,8 @@ jobs:
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
-          password: ${{ secrets.VPS_PASSWORD }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
           script: |
             cd ~/iot
             docker load < server.tar
